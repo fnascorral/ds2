@@ -65,7 +65,7 @@ protected:
           void(Support::ELFSupport::AuxiliaryVectorEntry const &)> const &cb);
 
 public:
-  bool isSingleStepSupported() const override;
+  bool isSingleStepSupported() const;
 
 public:
   SoftwareBreakpointManager *softwareBreakpointManager() const override;
