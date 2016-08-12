@@ -153,11 +153,6 @@ continue_waiting:
       _threads.erase(tid);
     }
 
-    if (_currentThread->_lastSyscallNumber == SYS_thr_create ||
-        _currentThread->_lastSyscallNumber == SYS_thr_new) {
-      // Rescan threads
-    }
-
     ptrace().resume(ProcessThreadId(_pid, tid), info);
     goto continue_waiting;
   }
