@@ -58,6 +58,7 @@ public:
   Host::POSIX::PTrace &ptrace() const override;
 
 protected:
+  void rescanThreads();
   ErrorCode updateInfo() override;
   ErrorCode updateAuxiliaryVector() override;
   ErrorCode enumerateAuxiliaryVector(

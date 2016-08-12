@@ -102,14 +102,11 @@ ErrorCode Process::attach(int waitStatus) {
 
         keep_going = true;
         auto thread = new Thread(this, tid);
-        if (ptrace().attach(tid) == kSuccess) {
-          int status;
+        int status;
 
-          ptrace().wait(tid, &status);
-          _ptrace.getLwpInfo(tid, &lwpinfo);
-          ptrace().traceThat(tid);
-          thread->updateStopInfo(status);
-        }
+        ptrace().wait(tid, &status);
+        ptrace().traceThat(tid);
+        thread->updateStopInfo(status);
       });
     }
   }
@@ -158,6 +155,11 @@ continue_waiting:
   tid = lwpinfo.pl_lwpid;
   auto threadIt = _threads.find(tid);
 
+  if (threadIt == _threads.end()) {
+    rescanThreads();
+    threadIt = _threads.find(tid);
+  }
+
   DS2ASSERT(threadIt != _threads.end());
   _currentThread = threadIt->second;
   _currentThread->updateStopInfo(status);
@@ -168,9 +170,16 @@ continue_waiting:
     _currentThread->readCPUState(state);
     _currentThread->_lastSyscallNumber = state.state64.gp.rax;
 
+    DS2LOG(Debug, "syscall entry: %d\n", _currentThread->_lastSyscallNumber);
+
     if (_currentThread->_lastSyscallNumber == SYS_thr_exit) {
       // Remove thread
       _threads.erase(tid);
+    }
+
+    if (_currentThread->_lastSyscallNumber == SYS_thr_create ||
+        _currentThread->_lastSyscallNumber == SYS_thr_new) {
+      // Rescan threads
     }
 
     ptrace().resume(ProcessThreadId(_pid, tid), info);
@@ -179,27 +188,11 @@ continue_waiting:
 
   // Check for syscall exit
   if (lwpinfo.pl_flags & PL_FLAG_SCX) {
+    DS2LOG(Debug, "syscall exit: %d\n", _currentThread->_lastSyscallNumber);
     if (_currentThread->_lastSyscallNumber == SYS_thr_create ||
         _currentThread->_lastSyscallNumber == SYS_thr_new) {
       // Rescan threads
-      ProcStat::EnumerateThreads(_pid, [&](pid_t tid) {
-        //
-        // Attach the thread to the debugger and wait
-        //
-        auto threadIt = _threads.find(tid);
-        if (threadIt != _threads.end())
-          return;
-
-        auto thread = new Thread(this, tid);
-        if (ptrace().attach(tid) == kSuccess) {
-          int status;
-
-          ptrace().wait(tid, &status);
-          _ptrace.getLwpInfo(tid, &lwpinfo);
-          ptrace().traceThat(tid);
-          thread->updateStopInfo(status);
-        }
-      });
+      rescanThreads();
     }
 
     ptrace().resume(ProcessThreadId(_pid, tid), info);
@@ -437,6 +430,28 @@ ErrorCode Process::writeMemory(Address const &address, void const *data,
   return ptrace().writeMemory(_currentThread->tid(), address, data, length,
                               count);
 }
+
+void Process::rescanThreads()
+{
+  ProcStat::EnumerateThreads(_pid, [&](pid_t tid) {
+    //
+    // Attach the thread to the debugger and wait
+    //
+    DS2LOG(Debug, "new thread: tid=%d", tid);
+    if (thread(tid) != nullptr || tid == _pid)
+      return;
+
+    auto thread = new Thread(this, tid);
+    if (ptrace().attach(tid) == kSuccess) {
+      int status;
+
+      ptrace().wait(tid, &status);
+      ptrace().traceThat(tid);
+      thread->updateStopInfo(status);
+    }
+  });
+}
+
 }
 }
 }
