@@ -82,6 +82,16 @@ ErrorCode Thread::readCPUState(Architecture::CPUState &state) {
   state.gp.pc = context.Pc;
   state.gp.cpsr = context.Cpsr;
 
+  if (state.isThumb()) {
+    if (state.gp.pc & 1ULL) {
+      DS2LOG(Debug, "removing thumb bit from pc and lr");
+      state.gp.pc &= ~1ULL;
+    } else {
+      DS2LOG(Warning,
+             "CPU is in thumb mode but doesn't have thumb bit set in pc");
+    }
+  }
+
   // TODO(sas): Handle floating point and debug registers.
 
   return kSuccess;
@@ -113,6 +123,12 @@ ErrorCode Thread::writeCPUState(Architecture::CPUState const &state) {
   context.Lr = state.gp.lr;
   context.Pc = state.gp.pc;
   context.Cpsr = state.gp.cpsr;
+
+  if (state.isThumb()) {
+    DS2ASSERT(!(state.gp.pc & 1ULL));
+    DS2LOG(Debug, "setting back thumb bit on pc and lr");
+    context.Pc |= 1ULL;
+  }
 
   BOOL result = SetThreadContext(_handle, &context);
   if (!result) {

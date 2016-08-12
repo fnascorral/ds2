@@ -53,7 +53,7 @@ struct CPUState {
   union {
     uint32_t regs[16 + 1];
     struct {
-      uint32_t r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, sp, ip, lr, pc,
+      uint32_t r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, ip, sp, lr, pc,
           cpsr;
     };
   } gp;
@@ -108,13 +108,13 @@ public:
 public:
   inline void getGPState(GPRegisterValueVector &regs) const {
     regs.clear();
-    for (size_t n = 0; n < array_size(gp.regs); n++) {
+    for (size_t n = 0; n < array_sizeof(gp.regs); n++) {
       regs.push_back(GPRegisterValue{sizeof(gp.regs[n]), gp.regs[n]});
     }
   }
 
   inline void setGPState(std::vector<uint64_t> const &regs) {
-    for (size_t n = 0; n < regs.size() && n < array_size(gp.regs); n++) {
+    for (size_t n = 0; n < regs.size() && n < array_sizeof(gp.regs); n++) {
       gp.regs[n] = regs[n];
     }
   }

@@ -18,7 +18,7 @@ namespace ds2 {
 namespace Target {
 namespace POSIX {
 
-class ELFProcess : public Process {
+class ELFProcess : public POSIX::Process {
 protected:
   std::string _auxiliaryVector;
   Address _sharedLibraryInfoAddress;
@@ -29,16 +29,13 @@ public:
 
 public:
   virtual ErrorCode getSharedLibraryInfoAddress(Address &address);
-  virtual ErrorCode enumerateSharedLibraries(
-      std::function<void(SharedLibraryInfo const &)> const &cb);
+  ErrorCode enumerateSharedLibraries(
+      std::function<void(SharedLibraryInfo const &)> const &cb) override;
 
 public:
   virtual ErrorCode enumerateAuxiliaryVector(
       std::function<
           void(Support::ELFSupport::AuxiliaryVectorEntry const &)> const &cb);
-
-public:
-  bool isELFProcess() const override;
 
 protected:
   ErrorCode updateInfo() override;

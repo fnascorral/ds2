@@ -503,8 +503,8 @@
         "x87-regs" : {
             "*" : {
                 "bit-size"              : 80,
-                "encoding"              : "ieee-extended",
-                "format"                : "float",
+                "encoding"              : "int",
+                "format"                : "vector",
                 "gdb-encoding"          : "x87-extension",
 
                 "base-dwarf-reg-number" : 33,
@@ -536,14 +536,14 @@
                 "no-gdb-reg-number"     : true
             },
 
-            "fctrl" : { },
-            "fstat" : { },
-            "ftag"  : { },
+            "fctrl" : { "bit-size" : 16 },
+            "fstat" : { "bit-size" : 16 },
+            "ftag"  : { "bit-size" : 8 },
             "fiseg" : { },
-            "fioff" : { "bit-size" : 64 },
+            "fioff" : { },
             "foseg" : { },
-            "fooff" : { "bit-size" : 64 },
-            "fop"   : { }
+            "fooff" : { },
+            "fop"   : { "bit-size" : 16 }
         },
 
         "sse-flags" : {
@@ -788,14 +788,14 @@
                 "x87-flags",
                 "sse-flags",
                 "sse-mask",
-                "x87-regs"
+                "x87-regs",
+                "sse-regs"
             ]
         },
         {
             "description" : "Advanced Vector Extensions",
             "sets"        : [
-                "avx-regs",
-                "sse-regs"
+                "avx-regs"
             ]
         }
     ]

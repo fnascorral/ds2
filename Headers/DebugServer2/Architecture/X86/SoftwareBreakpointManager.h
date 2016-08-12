@@ -22,25 +22,22 @@ private:
   std::map<uint64_t, uint8_t> _insns;
 
 public:
-  SoftwareBreakpointManager(Target::Process *process);
+  SoftwareBreakpointManager(Target::ProcessBase *process);
   ~SoftwareBreakpointManager() override;
 
-protected:
-  bool hit(Target::Thread *thread) override;
+public:
+  int hit(Target::Thread *thread, Site &site) override;
 
 public:
   void clear() override;
-
-public:
-  ErrorCode add(Address const &address, Type type, size_t size,
-                Mode mode) override;
 
 protected:
   ErrorCode enableLocation(Site const &site) override;
   ErrorCode disableLocation(Site const &site) override;
 
 protected:
-  friend Target::ProcessBase;
+  ErrorCode isValid(Address const &address, size_t size,
+                    Mode mode) const override;
 };
 }
 }

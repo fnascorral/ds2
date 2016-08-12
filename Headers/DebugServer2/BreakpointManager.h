@@ -42,6 +42,12 @@ public:
     Type type;
     Mode mode;
     size_t size;
+
+  public:
+    bool operator==(Site const &other) const {
+      return (address == other.address) && (type == other.type) &&
+             (mode == other.mode) && (size == other.size);
+    }
   };
 
   // Address->Site map
@@ -49,15 +55,13 @@ public:
 
 protected:
   SiteMap _sites;
-
-protected:
   bool _enabled;
 
 protected:
-  Target::Process *_process;
+  Target::ProcessBase *_process;
 
 protected:
-  BreakpointManager(Target::Process *process);
+  BreakpointManager(Target::ProcessBase *process);
 
 public:
   virtual ~BreakpointManager();
@@ -77,12 +81,19 @@ public:
   virtual void enumerate(std::function<void(Site const &)> const &cb) const;
 
 protected:
-  friend Target::Process;
+  virtual ErrorCode isValid(Address const &address, size_t size,
+                            Mode mode) const;
+
+protected:
   friend Target::ProcessBase;
 
 protected:
-  virtual bool hit(Address const &address);
-  virtual bool hit(Target::Thread *thread) = 0;
+  virtual bool hit(Address const &address, Site &site);
+
+public:
+  // Returns the hardware index of the breakpoint, if applicable.
+  // If not hit, returns a negative integer
+  virtual int hit(Target::Thread *thread, Site &site) = 0;
 
 protected:
   virtual void enable();

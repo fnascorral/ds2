@@ -11,6 +11,7 @@
 #define __DS2_LOG_CLASS_NAME__ "Target::Thread"
 
 #include "DebugServer2/Target/Thread.h"
+#include "DebugServer2/Architecture/X86/RegisterCopy.h"
 #include "DebugServer2/Host/Platform.h"
 #include "DebugServer2/Host/Windows/ExtraWrappers.h"
 #include "DebugServer2/Utils/Log.h"
@@ -24,29 +25,20 @@ namespace Target {
 namespace Windows {
 
 ErrorCode Thread::step(int signal, Address const &address) {
-  // Windows doesn't have a dedicated single-step call. We have to set
-  // the single step flag in eflags and resume the thread.
-  Architecture::CPUState state;
-  ErrorCode error;
-
-  error = readCPUState(state);
-  if (error != kSuccess)
+  // Windows doesn't have a dedicated single-step call. We have to set the
+  // single step flag (TF, 8th bit) in eflags and resume the thread.
+  ErrorCode error = modifyRegisters(
+      [](Architecture::CPUState &state) { state.gp.eflags |= (1 << 8); });
+  if (error != kSuccess) {
     return error;
-
-  // TF (trap flag) is the 8th bit of eflags.
-  state.gp.eflags |= (1 << 8);
-
-  error = writeCPUState(state);
-  if (error != kSuccess)
-    return error;
-
+  }
   return resume(signal, address);
 }
 
 ErrorCode Thread::readCPUState(Architecture::CPUState &state) {
   CONTEXT context;
 
-  memset(&context, 0, sizeof(context));
+  std::memset(&context, 0, sizeof(context));
   // TODO(sas): Handle AVX.
   context.ContextFlags = CONTEXT_INTEGER |            // GP registers.
                          CONTEXT_CONTROL |            // Some more GP + cs/ss.
@@ -60,23 +52,7 @@ ErrorCode Thread::readCPUState(Architecture::CPUState &state) {
     return Platform::TranslateError();
   }
 
-  // GP registers + segment selectors.
-  state.gp.eax = context.Eax;
-  state.gp.ecx = context.Ecx;
-  state.gp.edx = context.Edx;
-  state.gp.ebx = context.Ebx;
-  state.gp.esi = context.Esi;
-  state.gp.edi = context.Edi;
-  state.gp.ebp = context.Ebp;
-  state.gp.esp = context.Esp;
-  state.gp.eip = context.Eip;
-  state.gp.cs = context.SegCs & 0xffff;
-  state.gp.ss = context.SegSs & 0xffff;
-  state.gp.ds = context.SegDs & 0xffff;
-  state.gp.es = context.SegEs & 0xffff;
-  state.gp.fs = context.SegFs & 0xffff;
-  state.gp.gs = context.SegGs & 0xffff;
-  state.gp.eflags = context.EFlags;
+  user_to_state32(state, context);
 
   // x87 state
   state.x87.fstw = context.FloatSave.StatusWord;
@@ -117,28 +93,13 @@ ErrorCode Thread::readCPUState(Architecture::CPUState &state) {
 ErrorCode Thread::writeCPUState(Architecture::CPUState const &state) {
   CONTEXT context;
 
-  memset(&context, 0, sizeof(context));
+  std::memset(&context, 0, sizeof(context));
   // TODO(sas): Handle floats, SSE, AVX and debug registers.
   context.ContextFlags = CONTEXT_INTEGER | // GP registers.
                          CONTEXT_CONTROL | // Some more GP + cs/ss.
                          CONTEXT_SEGMENTS; // Data segment selectors.
 
-  context.Eax = state.gp.eax;
-  context.Ecx = state.gp.ecx;
-  context.Edx = state.gp.edx;
-  context.Ebx = state.gp.ebx;
-  context.Esi = state.gp.esi;
-  context.Edi = state.gp.edi;
-  context.Ebp = state.gp.ebp;
-  context.Esp = state.gp.esp;
-  context.Eip = state.gp.eip;
-  context.SegCs = state.gp.cs & 0xffff;
-  context.SegSs = state.gp.ss & 0xffff;
-  context.SegDs = state.gp.ds & 0xffff;
-  context.SegEs = state.gp.es & 0xffff;
-  context.SegFs = state.gp.fs & 0xffff;
-  context.SegGs = state.gp.gs & 0xffff;
-  context.EFlags = state.gp.eflags;
+  state32_to_user(context, state);
 
   BOOL result = SetThreadContext(_handle, &context);
   if (!result) {

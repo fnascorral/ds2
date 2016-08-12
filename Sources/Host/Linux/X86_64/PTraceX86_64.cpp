@@ -9,6 +9,7 @@
 //
 
 #include "DebugServer2/Host/Linux/PTrace.h"
+#include "DebugServer2/Architecture/X86/RegisterCopy.h"
 #include "DebugServer2/Host/Linux/ExtraWrappers.h"
 #include "DebugServer2/Host/Platform.h"
 
@@ -23,130 +24,91 @@ namespace ds2 {
 namespace Host {
 namespace Linux {
 
-struct PTracePrivateData {
-  uint8_t breakpointCount;
-  uint8_t watchpointCount;
-  uint8_t maxWatchpointSize;
-
-  PTracePrivateData()
-      : breakpointCount(0), watchpointCount(0), maxWatchpointSize(0) {}
-};
-
-void PTrace::initCPUState(ProcessId pid) {
-  if (_privateData != nullptr)
-    return;
-
-  _privateData = new PTracePrivateData;
-}
-
-void PTrace::doneCPUState() { delete _privateData; }
-
-//
-// 32-bits helpers
-//
-
 static inline void user_to_state32(ds2::Architecture::X86_64::CPUState32 &state,
-                                   user_regs_struct const &user) {
-  state.gp.eax = user.rax;
-  state.gp.ecx = user.rcx;
-  state.gp.edx = user.rdx;
-  state.gp.ebx = user.rbx;
-  state.gp.esi = user.rsi;
-  state.gp.edi = user.rdi;
-  state.gp.ebp = user.rbp;
-  state.gp.esp = user.rsp;
-  state.gp.eip = user.rip;
-  state.gp.cs = user.cs & 0xffff;
-  state.gp.ss = user.ss & 0xffff;
-  state.gp.ds = user.ds & 0xffff;
-  state.gp.es = user.es & 0xffff;
-  state.gp.fs = user.fs & 0xffff;
-  state.gp.gs = user.gs & 0xffff;
-  state.gp.eflags = user.eflags;
-  state.linux_gp.orig_eax = user.orig_rax;
-}
-
-static inline void
-state32_to_user(user_regs_struct &user,
-                ds2::Architecture::X86_64::CPUState32 const &state) {
-  user.rax = state.gp.eax;
-  user.rcx = state.gp.ecx;
-  user.rdx = state.gp.edx;
-  user.rbx = state.gp.ebx;
-  user.rsi = state.gp.esi;
-  user.rdi = state.gp.edi;
-  user.rbp = state.gp.ebp;
-  user.rsp = state.gp.esp;
-  user.rip = state.gp.eip;
-  user.cs = state.gp.cs;
-  user.ss = state.gp.ss;
-  user.ds = state.gp.ds;
-  user.es = state.gp.es;
-  user.fs = state.gp.fs;
-  user.gs = state.gp.gs;
-  user.eflags = state.gp.eflags;
-  user.orig_rax = state.linux_gp.orig_eax;
-}
-
-static inline void user_to_state32(ds2::Architecture::X86_64::CPUState32 &state,
-                                   user_fpregs_struct const &user) {
+                                   struct xfpregs_struct const &xfpregs) {
   //
   // X87 State
   //
-  state.x87.fstw = user.swd;
-  state.x87.fctw = user.cwd;
-  state.x87.ftag = user.ftw;
-  state.x87.fop = user.fop;
-  state.x87.fiseg = user.rip >> 32;
-  state.x87.fioff = user.rip;
-  state.x87.foseg = user.rdp >> 32;
-  state.x87.fooff = user.rdp;
+  state.x87.fstw = xfpregs.fpregs.swd;
+  state.x87.fctw = xfpregs.fpregs.cwd;
+  state.x87.ftag = xfpregs.fpregs.ftw;
+  state.x87.fop = xfpregs.fpregs.fop;
+  state.x87.fiseg = xfpregs.fpregs.rip >> 32;
+  state.x87.fioff = xfpregs.fpregs.rip;
+  state.x87.foseg = xfpregs.fpregs.rdp >> 32;
+  state.x87.fooff = xfpregs.fpregs.rdp;
 
-  uint8_t const *st_space = reinterpret_cast<uint8_t const *>(user.st_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(state.x87.regs[n].bytes, st_space + n * 16,
-           sizeof(state.x87.regs[n].bytes));
+  auto st_space = reinterpret_cast<uint8_t const *>(xfpregs.fpregs.st_space);
+  static const size_t x87Size = sizeof(state.x87.regs[0].bytes);
+  for (size_t n = 0; n < array_sizeof(state.x87.regs); n++) {
+    memcpy(state.x87.regs[n].bytes, st_space + n * x87Size, x87Size);
   }
 
   //
   // SSE State
   //
-  state.sse.mxcsr = user.mxcsr;
-  state.sse.mxcsrmask = user.mxcr_mask;
-  uint8_t const *xmm_space = reinterpret_cast<uint8_t const *>(user.xmm_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(&state.sse.regs[n], xmm_space + n * 16, sizeof(state.sse.regs[n]));
+  state.sse.mxcsr = xfpregs.fpregs.mxcsr;
+  state.sse.mxcsrmask = xfpregs.fpregs.mxcr_mask;
+  auto xmm_space = reinterpret_cast<uint8_t const *>(xfpregs.fpregs.xmm_space);
+  static const size_t sseSize = sizeof(state.sse.regs[0]);
+  for (size_t n = 0; n < array_sizeof(state.sse.regs); n++) {
+    memcpy(&state.sse.regs[n], xmm_space + n * sseSize, sseSize);
+  }
+
+  //
+  //  EAVX State
+  //
+  auto ymmh = reinterpret_cast<uint8_t const *>(xfpregs.ymmh);
+  static const size_t avxSize = sizeof(state.avx.regs[0]);
+  static const size_t ymmhSize = avxSize - sseSize;
+  for (size_t n = 0; n < array_sizeof(state.avx.regs); n++) {
+    auto avxHigh = reinterpret_cast<uint8_t *>(&state.avx.regs[n]) + sseSize;
+    memcpy(avxHigh, ymmh + n * ymmhSize, ymmhSize);
   }
 }
 
 static inline void
-state32_to_user(user_fpregs_struct &user,
+state32_to_user(struct xfpregs_struct &xfpregs,
                 ds2::Architecture::X86_64::CPUState32 const &state) {
   //
   // X87 State
   //
-  user.swd = state.x87.fstw;
-  user.cwd = state.x87.fctw;
-  user.ftw = state.x87.ftag;
-  user.fop = state.x87.fop;
-  user.rip = (static_cast<uint64_t>(state.x87.fiseg) << 32) | state.x87.fioff;
-  user.rdp = (static_cast<uint64_t>(state.x87.foseg) << 32) | state.x87.fooff;
-  user.rdp = state.x87.fooff;
+  xfpregs.fpregs.swd = state.x87.fstw;
+  xfpregs.fpregs.cwd = state.x87.fctw;
+  xfpregs.fpregs.ftw = state.x87.ftag;
+  xfpregs.fpregs.fop = state.x87.fop;
+  xfpregs.fpregs.rip =
+      (static_cast<uint64_t>(state.x87.fiseg) << 32) | state.x87.fioff;
+  xfpregs.fpregs.rdp =
+      (static_cast<uint64_t>(state.x87.foseg) << 32) | state.x87.fooff;
 
-  uint8_t *st_space = reinterpret_cast<uint8_t *>(user.st_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(st_space + n * 16, state.x87.regs[n].bytes,
-           sizeof(state.x87.regs[n].bytes));
+  auto st_space = reinterpret_cast<uint8_t *>(xfpregs.fpregs.st_space);
+  static const size_t x87Size = sizeof(state.x87.regs[0].bytes);
+  for (size_t n = 0; n < array_sizeof(state.x87.regs); n++) {
+    memcpy(st_space + n * x87Size, state.x87.regs[n].bytes, x87Size);
   }
 
   //
   // SSE State
   //
-  user.mxcsr = state.sse.mxcsr;
-  user.mxcr_mask = state.sse.mxcsrmask;
-  uint8_t *xmm_space = reinterpret_cast<uint8_t *>(user.xmm_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(xmm_space + n * 16, &state.sse.regs[n], sizeof(state.sse.regs[n]));
+  xfpregs.fpregs.mxcsr = state.sse.mxcsr;
+  xfpregs.fpregs.mxcr_mask = state.sse.mxcsrmask;
+  auto xmm_space = reinterpret_cast<uint8_t *>(xfpregs.fpregs.xmm_space);
+  static const size_t sseSize = sizeof(state.sse.regs[0]);
+  for (size_t n = 0; n < array_sizeof(state.sse.regs); n++) {
+    memcpy(xmm_space + n * sseSize, &state.sse.regs[n], sseSize);
+  }
+
+  //
+  //  EAVX State
+  //
+  auto ymmh = reinterpret_cast<uint8_t *>(xfpregs.ymmh);
+  static const size_t avxSize = sizeof(state.avx.regs[0]);
+  static const size_t ymmhSize = avxSize - sseSize;
+  for (size_t n = 0; n < array_sizeof(state.avx.regs); n++) {
+    auto avxHigh =
+        reinterpret_cast<const uint8_t *>(&state.avx.regs[n]) + sseSize;
+    memcpy(ymmh + n * ymmhSize, avxHigh, ymmhSize);
   }
 }
 
@@ -155,124 +117,100 @@ state32_to_user(user_fpregs_struct &user,
 //
 
 static inline void user_to_state64(ds2::Architecture::X86_64::CPUState64 &state,
-                                   user_regs_struct const &user) {
-  state.gp.rax = user.rax;
-  state.gp.rcx = user.rcx;
-  state.gp.rdx = user.rdx;
-  state.gp.rbx = user.rbx;
-  state.gp.rsi = user.rsi;
-  state.gp.rdi = user.rdi;
-  state.gp.rbp = user.rbp;
-  state.gp.rsp = user.rsp;
-  state.gp.r8 = user.r8;
-  state.gp.r9 = user.r9;
-  state.gp.r10 = user.r10;
-  state.gp.r11 = user.r11;
-  state.gp.r12 = user.r12;
-  state.gp.r13 = user.r13;
-  state.gp.r14 = user.r14;
-  state.gp.r15 = user.r15;
-  state.gp.rip = user.rip;
-  state.gp.cs = user.cs & 0xffff;
-  state.gp.ss = user.ss & 0xffff;
-  state.gp.ds = user.ds & 0xffff;
-  state.gp.es = user.es & 0xffff;
-  state.gp.fs = user.fs & 0xffff;
-  state.gp.gs = user.gs & 0xffff;
-  state.gp.eflags = user.eflags;
-  state.linux_gp.orig_rax = user.orig_rax;
-  state.linux_gp.fs_base = user.fs_base;
-  state.linux_gp.gs_base = user.gs_base;
-}
-
-static inline void
-state64_to_user(user_regs_struct &user,
-                ds2::Architecture::X86_64::CPUState64 const &state) {
-  user.rax = state.gp.rax;
-  user.rcx = state.gp.rcx;
-  user.rdx = state.gp.rdx;
-  user.rbx = state.gp.rbx;
-  user.rsi = state.gp.rsi;
-  user.rdi = state.gp.rdi;
-  user.rbp = state.gp.rbp;
-  user.rsp = state.gp.rsp;
-  user.r8 = state.gp.r8;
-  user.r9 = state.gp.r9;
-  user.r10 = state.gp.r10;
-  user.r11 = state.gp.r11;
-  user.r12 = state.gp.r12;
-  user.r13 = state.gp.r13;
-  user.r14 = state.gp.r14;
-  user.r15 = state.gp.r15;
-  user.rip = state.gp.rip;
-  user.cs = state.gp.cs;
-  user.ss = state.gp.ss;
-  user.ds = state.gp.ds;
-  user.es = state.gp.es;
-  user.fs = state.gp.fs;
-  user.gs = state.gp.gs;
-  user.eflags = state.gp.eflags;
-  user.orig_rax = state.linux_gp.orig_rax;
-  user.fs_base = state.linux_gp.fs_base;
-  user.gs_base = state.linux_gp.gs_base;
-}
-
-static inline void user_to_state64(ds2::Architecture::X86_64::CPUState64 &state,
-                                   user_fpregs_struct const &user) {
+                                   struct xfpregs_struct const &xfpregs) {
   //
   // X87 State
   //
-  state.x87.fstw = user.swd;
-  state.x87.fctw = user.cwd;
-  state.x87.ftag = user.ftw;
-  state.x87.fop = user.fop;
-  state.x87.firip = user.rip;
-  state.x87.forip = user.rdp;
+  state.x87.fstw = xfpregs.fpregs.swd;
+  state.x87.fctw = xfpregs.fpregs.cwd;
+  state.x87.ftag = xfpregs.fpregs.ftw;
+  state.x87.fop = xfpregs.fpregs.fop;
+  state.x87.firip = xfpregs.fpregs.rip;
+  state.x87.forip = xfpregs.fpregs.rdp;
 
-  uint8_t const *st_space = reinterpret_cast<uint8_t const *>(user.st_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(state.x87.regs[n].bytes, st_space + n * 16,
-           sizeof(state.x87.regs[n].bytes));
+  auto st_space = reinterpret_cast<uint8_t const *>(xfpregs.fpregs.st_space);
+  static const size_t x87Size = sizeof(state.x87.regs[0].bytes);
+  for (size_t n = 0; n < array_sizeof(state.x87.regs); n++) {
+    memcpy(state.x87.regs[n].bytes, st_space + n * x87Size, x87Size);
   }
 
   //
   // SSE State
   //
-  state.sse.mxcsr = user.mxcsr;
-  state.sse.mxcsrmask = user.mxcr_mask;
-  uint8_t const *xmm_space = reinterpret_cast<uint8_t const *>(user.xmm_space);
-  for (size_t n = 0; n < 16; n++) {
-    memcpy(&state.sse.regs[n], xmm_space + n * 16, sizeof(state.sse.regs[n]));
+
+  // This hack is necessary because we don't handle EAVX registers
+  size_t numSSEState = array_sizeof(state.sse.regs);
+  size_t numSSEUser =
+      sizeof(xfpregs.fpregs.xmm_space) / sizeof(state.sse.regs[0]);
+  size_t numSSE = std::min(numSSEState, numSSEUser);
+
+  state.sse.mxcsr = xfpregs.fpregs.mxcsr;
+  state.sse.mxcsrmask = xfpregs.fpregs.mxcr_mask;
+  auto xmm_space = reinterpret_cast<uint8_t const *>(xfpregs.fpregs.xmm_space);
+  static const size_t sseSize = sizeof(state.sse.regs[0]);
+  for (size_t n = 0; n < numSSE; n++) {
+    memcpy(&state.sse.regs[n], xmm_space + n * sseSize, sseSize);
+  }
+
+  //
+  //  EAVX State
+  //
+  auto ymmh = reinterpret_cast<uint8_t const *>(xfpregs.ymmh);
+  static const size_t avxSize = sizeof(state.avx.regs[0]);
+  static const size_t ymmhSize = avxSize - sseSize;
+  for (size_t n = 0; n < numSSE; n++) {
+    auto avxHigh = reinterpret_cast<uint8_t *>(&state.avx.regs[n]) + sseSize;
+    memcpy(avxHigh, ymmh + n * ymmhSize, ymmhSize);
   }
 }
 
 static inline void
-state64_to_user(user_fpregs_struct &user,
+state64_to_user(struct xfpregs_struct &xfpregs,
                 ds2::Architecture::X86_64::CPUState64 const &state) {
   //
   // X87 State
   //
-  user.swd = state.x87.fstw;
-  user.cwd = state.x87.fctw;
-  user.ftw = state.x87.ftag;
-  user.fop = state.x87.fop;
-  user.rip = state.x87.firip;
-  user.rdp = state.x87.forip;
+  xfpregs.fpregs.swd = state.x87.fstw;
+  xfpregs.fpregs.cwd = state.x87.fctw;
+  xfpregs.fpregs.ftw = state.x87.ftag;
+  xfpregs.fpregs.fop = state.x87.fop;
+  xfpregs.fpregs.rip = state.x87.firip;
+  xfpregs.fpregs.rdp = state.x87.forip;
 
-  uint8_t *st_space = reinterpret_cast<uint8_t *>(user.st_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(st_space + n * 16, state.x87.regs[n].bytes,
-           sizeof(state.x87.regs[n].bytes));
+  auto st_space = reinterpret_cast<uint8_t *>(xfpregs.fpregs.st_space);
+  static const size_t x87Size = sizeof(state.x87.regs[0].bytes);
+  for (size_t n = 0; n < array_sizeof(state.x87.regs); n++) {
+    memcpy(st_space + n * x87Size, state.x87.regs[n].bytes, x87Size);
   }
 
   //
   // SSE State
   //
-  user.mxcsr = state.sse.mxcsr;
-  user.mxcr_mask = state.sse.mxcsrmask;
-  uint8_t *xmm_space = reinterpret_cast<uint8_t *>(user.xmm_space);
-  for (size_t n = 0; n < 16; n++) {
-    memcpy(xmm_space + n * 16, &state.sse.regs[n], sizeof(state.sse.regs[n]));
+
+  // This hack is necessary because we don't handle EAVX registers
+  size_t numSSEState = array_sizeof(state.sse.regs);
+  size_t numSSEUser =
+      sizeof(xfpregs.fpregs.xmm_space) / sizeof(state.sse.regs[0]);
+  size_t numSSE = std::min(numSSEState, numSSEUser);
+
+  xfpregs.fpregs.mxcsr = state.sse.mxcsr;
+  xfpregs.fpregs.mxcr_mask = state.sse.mxcsrmask;
+  auto xmm_space = reinterpret_cast<uint8_t *>(xfpregs.fpregs.xmm_space);
+  static const size_t sseSize = sizeof(state.sse.regs[0]);
+  for (size_t n = 0; n < numSSE; n++) {
+    memcpy(xmm_space + n * sseSize, &state.sse.regs[n], sseSize);
+  }
+
+  //
+  //  EAVX State
+  //
+  auto ymmh = reinterpret_cast<uint8_t *>(xfpregs.ymmh);
+  static const size_t avxSize = sizeof(state.avx.regs[0]);
+  static const size_t ymmhSize = avxSize - sseSize;
+  for (size_t n = 0; n < numSSE; n++) {
+    auto avxHigh =
+        reinterpret_cast<const uint8_t *>(&state.avx.regs[n]) + sseSize;
+    memcpy(ymmh + n * ymmhSize, avxHigh, ymmhSize);
   }
 }
 
@@ -286,11 +224,6 @@ ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid,
     return error;
 
   //
-  // Initialize the CPU state, just in case.
-  //
-  initCPUState(pid);
-
-  //
   // Read GPRs
   //
   user_regs_struct gprs;
@@ -299,21 +232,27 @@ ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid,
 
   if (pinfo.pointerSize == sizeof(uint32_t)) {
     state.is32 = true;
-    user_to_state32(state.state32, gprs);
+    Architecture::X86::user_to_state32(state.state32, gprs);
   } else {
     state.is32 = false;
-    user_to_state64(state.state64, gprs);
+    Architecture::X86::user_to_state64(state.state64, gprs);
   }
 
   //
-  // Read X87 and SSE state
+  // Read SSE and AVX
   //
-  user_fpregs_struct fprs;
-  if (wrapPtrace(PTRACE_GETFPREGS, pid, nullptr, &fprs) == 0) {
+  struct xfpregs_struct xfpregs;
+  struct iovec fpregs_iovec;
+  fpregs_iovec.iov_base = &xfpregs;
+  fpregs_iovec.iov_len = sizeof(xfpregs);
+
+  // If this call fails, don't return failure, since AVX may not be available
+  // on this CPU
+  if (wrapPtrace(PTRACE_GETREGSET, pid, NT_X86_XSTATE, &fpregs_iovec) == 0) {
     if (pinfo.pointerSize == sizeof(uint32_t)) {
-      user_to_state32(state.state32, fprs);
+      user_to_state32(state.state32, xfpregs);
     } else {
-      user_to_state64(state.state64, fprs);
+      user_to_state64(state.state64, xfpregs);
     }
   }
 
@@ -329,11 +268,6 @@ ErrorCode PTrace::writeCPUState(ProcessThreadId const &ptid,
   if (error != kSuccess)
     return error;
 
-  //
-  // Initialize the CPU state, just in case.
-  //
-  initCPUState(pid);
-
   if (pinfo.pointerSize == sizeof(uint32_t) && !state.is32)
     return kErrorInvalidArgument;
   else if (pinfo.pointerSize != sizeof(uint32_t) && state.is32)
@@ -344,25 +278,36 @@ ErrorCode PTrace::writeCPUState(ProcessThreadId const &ptid,
   //
   user_regs_struct gprs;
   if (state.is32) {
-    state32_to_user(gprs, state.state32);
+    Architecture::X86::state32_to_user(gprs, state.state32);
   } else {
-    state64_to_user(gprs, state.state64);
+    Architecture::X86::state64_to_user(gprs, state.state64);
   }
 
   if (wrapPtrace(PTRACE_SETREGS, pid, nullptr, &gprs) < 0)
     return Platform::TranslateError();
 
   //
-  // Write X87 and SSE state
+  // Write SSE and AVX
   //
-  user_fpregs_struct fprs;
-  if (state.is32) {
-    state32_to_user(fprs, state.state32);
-  } else {
-    state64_to_user(fprs, state.state64);
+  struct xfpregs_struct xfpregs;
+  struct iovec fpregs_iovec;
+  fpregs_iovec.iov_base = &xfpregs;
+  fpregs_iovec.iov_len = sizeof(xfpregs);
+
+  // We need this read to fill the kernel header (xfpregs_struct.xstate_hdr)
+  // TODO - add this header to CPUState so we don't need this read
+  if (wrapPtrace(PTRACE_GETREGSET, pid, NT_X86_XSTATE, &fpregs_iovec) < 0) {
+    // If we fail to read the AVX register info, still write the SSE regs
+    fpregs_iovec.iov_len = sizeof(xfpregs.fpregs);
   }
 
-  wrapPtrace(PTRACE_SETFPREGS, pid, nullptr, &fprs);
+  if (state.is32) {
+    state32_to_user(xfpregs, state.state32);
+  } else {
+    state64_to_user(xfpregs, state.state64);
+  }
+
+  wrapPtrace(PTRACE_SETREGSET, pid, NT_X86_XSTATE, &fpregs_iovec);
 
   return kSuccess;
 }

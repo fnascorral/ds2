@@ -22,54 +22,33 @@ struct PTracePrivateData;
 
 class PTrace : public POSIX::PTrace {
 public:
-  PTrace();
-  virtual ~PTrace();
+  ErrorCode traceThat(ProcessId pid) override;
 
 public:
-  virtual ErrorCode traceMe(bool disableASLR);
-  virtual ErrorCode traceThat(ProcessId pid);
+  ErrorCode kill(ProcessThreadId const &ptid, int signal) override;
 
 public:
-  virtual ErrorCode kill(ProcessThreadId const &ptid, int signal);
+  ErrorCode readString(ProcessThreadId const &ptid, Address const &address,
+                       std::string &str, size_t length,
+                       size_t *nread = nullptr) override;
+  ErrorCode readMemory(ProcessThreadId const &ptid, Address const &address,
+                       void *buffer, size_t length,
+                       size_t *nread = nullptr) override;
+  ErrorCode writeMemory(ProcessThreadId const &ptid, Address const &address,
+                        void const *buffer, size_t length,
+                        size_t *nwritten = nullptr) override;
 
 public:
-  virtual ErrorCode readString(ProcessThreadId const &ptid,
-                               Address const &address, std::string &str,
-                               size_t length, size_t *nread = nullptr);
-  virtual ErrorCode readMemory(ProcessThreadId const &ptid,
-                               Address const &address, void *buffer,
-                               size_t length, size_t *nread = nullptr);
-  virtual ErrorCode writeMemory(ProcessThreadId const &ptid,
-                                Address const &address, void const *buffer,
-                                size_t length, size_t *nwritten = nullptr);
+  ErrorCode readCPUState(ProcessThreadId const &ptid, ProcessInfo const &info,
+                         Architecture::CPUState &state) override;
+  ErrorCode writeCPUState(ProcessThreadId const &ptid, ProcessInfo const &info,
+                          Architecture::CPUState const &state) override;
 
 public:
-  virtual ErrorCode readCPUState(ProcessThreadId const &ptid,
-                                 ProcessInfo const &info,
-                                 Architecture::CPUState &state);
-  virtual ErrorCode writeCPUState(ProcessThreadId const &ptid,
-                                  ProcessInfo const &info,
-                                  Architecture::CPUState const &state);
+  ErrorCode suspend(ProcessThreadId const &ptid) override;
 
 public:
-  virtual ErrorCode suspend(ProcessThreadId const &ptid);
-
-public:
-  virtual ErrorCode step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
-                         int signal = 0, Address const &address = Address());
-  virtual ErrorCode resume(ProcessThreadId const &ptid,
-                           ProcessInfo const &pinfo, int signal = 0,
-                           Address const &address = Address());
-
-public:
-  virtual ErrorCode getSigInfo(ProcessThreadId const &ptid, siginfo_t &si);
-
-protected:
-  void initCPUState(ProcessId pid);
-  void doneCPUState();
-
-public:
-  PTracePrivateData *_privateData;
+  ErrorCode getSigInfo(ProcessThreadId const &ptid, siginfo_t &si) override;
 };
 }
 }

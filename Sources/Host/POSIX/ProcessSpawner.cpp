@@ -10,12 +10,14 @@
 
 #define __DS2_LOG_CLASS_NAME__ "ProcessSpawner"
 
+#include "DebugServer2/Base.h"
 #if defined(OS_LINUX)
 #include "DebugServer2/Host/Linux/ExtraWrappers.h"
 #endif
 #include "DebugServer2/Host/Platform.h"
 #include "DebugServer2/Host/ProcessSpawner.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <cerrno>
 #include <climits>
@@ -26,6 +28,8 @@
 #include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+using ds2::Utils::Stringify;
 
 namespace ds2 {
 namespace Host {
@@ -72,7 +76,8 @@ static inline void close_terminal(int fds[2]) {
   ::close(fds[1]);
 }
 
-ProcessSpawner::ProcessSpawner() : _exitStatus(0), _signalCode(0), _pid(0) {}
+ProcessSpawner::ProcessSpawner()
+    : _exitStatus(0), _signalCode(0), _pid(0), _shell(false) {}
 
 ProcessSpawner::~ProcessSpawner() { flushAndExit(); }
 
@@ -86,6 +91,24 @@ bool ProcessSpawner::setExecutable(std::string const &path) {
     return false;
 
   _executablePath = path;
+  _shell = false;
+  return true;
+}
+
+bool ProcessSpawner::setShellCommand(std::string const &command) {
+  if (_pid != 0) {
+    return false;
+  }
+
+  setExecutable("sh");
+
+  StringCollection args;
+  args.push_back("-c");
+  args.push_back(command);
+
+  setArguments(args);
+
+  _shell = true;
   return true;
 }
 
@@ -256,6 +279,44 @@ bool ProcessSpawner::redirectErrorToBuffer() {
 }
 
 //
+// Terminal input redirection
+//
+ErrorCode ProcessSpawner::input(ByteVector const &buf) {
+  if (_pid == 0) {
+    return kErrorProcessNotFound;
+  }
+
+  if (_descriptors[0].mode != kRedirectTerminal) {
+    return kErrorInvalidArgument;
+  }
+
+  size_t size = buf.size();
+  const unsigned char *data = buf.data();
+  while (size > 0) {
+    ssize_t nwritten = ::write(_descriptors[0].fd, data, size);
+    if (nwritten < 0) {
+      return Platform::TranslateError();
+    }
+
+    size -= nwritten;
+    data += nwritten;
+  }
+
+  return kSuccess;
+}
+
+bool ProcessSpawner::redirectInputToTerminal() {
+  if (_pid != 0 || _descriptors[0].mode != kRedirectUnset)
+    return false;
+
+  _descriptors[0].mode = kRedirectTerminal;
+  _descriptors[0].delegate = nullptr;
+  _descriptors[0].fd = -1;
+  _descriptors[0].path.clear();
+  return true;
+}
+
+//
 // Delegate redirection
 //
 bool ProcessSpawner::redirectOutputToDelegate(RedirectDelegate delegate) {
@@ -312,10 +373,16 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
       break;
 
     case kRedirectFile:
+      // Don't forget to set O_NOCTTY on these. If we run without a controlling
+      // terminal (i.e.: we called `setsid()` during initialization), and if
+      // the remote sends us the path to a virtual terminal (e.g.:
+      // `/dev/pts/2`) to use as stdin/stdout/stderr, opening that terminal
+      // makes it become our controlling terminal. We then die when closing it
+      // later on.
       if (n == 0) {
-        fds[n][RD] = ::open(_descriptors[n].path.c_str(), O_RDONLY);
+        fds[n][RD] = ::open(_descriptors[n].path.c_str(), O_RDONLY | O_NOCTTY);
       } else {
-        fds[n][WR] = ::open(_descriptors[n].path.c_str(), O_RDWR);
+        fds[n][WR] = ::open(_descriptors[n].path.c_str(), O_RDWR | O_NOCTTY);
         if (fds[n][WR] < 0) {
           fds[n][WR] =
               ::open(_descriptors[n].path.c_str(), O_CREAT | O_RDWR, 0600);
@@ -328,8 +395,11 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
     // fall-through
     case kRedirectDelegate:
       startRedirectThread = true;
-      if (term[0] == -1) {
+    // fall-through
+    case kRedirectTerminal:
+      if (term[RD] == -1) {
         if (!open_terminal(term)) {
+          DS2LOG(Error, "failed to open terminal: %s", Stringify::Errno(errno));
           return Platform::TranslateError();
         }
       }
@@ -342,7 +412,8 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
   _pid = ::fork();
   if (_pid < 0) {
     close_terminal(term);
-    return kErrorNoMemory;
+    DS2LOG(Error, "failed to fork: %s", Stringify::Errno(errno));
+    return Platform::TranslateError();
   }
 
   if (_pid == 0) {
@@ -356,6 +427,7 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
           break;
 
         case kRedirectDelegate:
+        case kRedirectTerminal:
           //
           // We are using the same virtual terminal for all delegate
           // redirections, so dup2() only, do not close. We will close when all
@@ -386,8 +458,9 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
 
       if (!_workingDirectory.empty()) {
         int res = ::chdir(_workingDirectory.c_str());
-        if (res != 0)
+        if (res != 0) {
           return Platform::TranslateError();
+        }
       }
 
       std::vector<char *> args;
@@ -402,12 +475,21 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
             (new std::string(env.first + '=' + env.second))->c_str()));
       environment.push_back(nullptr);
 
-      if (!preExecAction())
+      if (!preExecAction()) {
+        DS2LOG(Error, "pre exec action failed");
         return kErrorUnknown;
+      }
 
-      if (::execve(_executablePath.c_str(), &args[0], &environment[0]) < 0) {
-        DS2LOG(Error, "cannot spawn executable %s, error=%s",
-               _executablePath.c_str(), strerror(errno));
+      if (_shell) {
+        if (::execvp(_executablePath.c_str(), &args[0]) < 0) {
+          DS2LOG(Error, "cannot run shell command %s, error=%s",
+                 _executablePath.c_str(), strerror(errno));
+        }
+      } else {
+        if (::execve(_executablePath.c_str(), &args[0], &environment[0]) < 0) {
+          DS2LOG(Error, "cannot spawn executable %s, error=%s",
+                 _executablePath.c_str(), strerror(errno));
+        }
       }
     }
     ::_exit(127);
@@ -421,6 +503,7 @@ ErrorCode ProcessSpawner::run(std::function<bool()> preExecAction) {
       // do nothing
       break;
 
+    case kRedirectTerminal:
     case kRedirectDelegate:
       _descriptors[n].fd = term[RD];
       break;
@@ -529,10 +612,11 @@ void ProcessSpawner::redirectionThread() {
         hup = true;
       }
 
-      size_t index;
       RedirectDescriptor *descriptor = nullptr;
-      for (index = 0; index < 3; index++) {
-        if (_descriptors[index].fd == pfds[n].fd) {
+      for (int index = 0; index < 3; index++) {
+        if (_descriptors[index].fd == pfds[n].fd &&
+            (_descriptors[index].mode == kRedirectBuffer ||
+             _descriptors[index].mode == kRedirectDelegate)) {
           descriptor = &_descriptors[index];
           break;
         }

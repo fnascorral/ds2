@@ -10,6 +10,7 @@
 
 #include "DebugServer2/Architecture/ARM/SoftwareSingleStep.h"
 #include "DebugServer2/Architecture/ARM/Branching.h"
+#include "DebugServer2/Utils/Bits.h"
 #include "DebugServer2/Utils/Log.h"
 
 using ds2::Architecture::CPUState;
@@ -26,8 +27,6 @@ ErrorCode PrepareThumbSoftwareSingleStep(Process *process, uint32_t pc,
                                          uint32_t &branchPCSize) {
   ErrorCode error;
   uint32_t insns[2];
-
-  DS2LOG(Debug, "process=%p", process);
 
   error = process->readMemory(pc, insns, sizeof(insns));
   if (error != ds2::kSuccess)
@@ -156,7 +155,7 @@ ErrorCode PrepareThumbSoftwareSingleStep(Process *process, uint32_t pc,
   //
   case ds2::Architecture::ARM::kBranchTypeBLX_i:
     branchPC = pc + info.disp;
-    branchPC = (branchPC + info.align - 1) & ~info.align;
+    ds2::Utils::Align(branchPC, info.align);
     branchPCSize = 4;
     break;
 
@@ -338,14 +337,13 @@ ErrorCode PrepareSoftwareSingleStep(Process *process,
                                     Address const &address) {
   ErrorCode error;
   bool link = false;
-  bool isThumb = !!(state.gp.cpsr & (1 << 5));
   uint32_t pc = address.valid() ? address.value() : state.pc();
   uint32_t nextPC = static_cast<uint32_t>(-1);
   uint32_t nextPCSize = 0;
   uint32_t branchPC = static_cast<uint32_t>(-1);
   uint32_t branchPCSize = 0;
 
-  if (isThumb) {
+  if (state.isThumb()) {
     error = PrepareThumbSoftwareSingleStep(process, pc, state, link, nextPC,
                                            nextPCSize, branchPC, branchPCSize);
   } else {

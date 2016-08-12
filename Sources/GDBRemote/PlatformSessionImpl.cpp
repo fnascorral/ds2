@@ -24,14 +24,12 @@ using ds2::Host::ProcessSpawner;
 namespace ds2 {
 namespace GDBRemote {
 
-PlatformSessionImpl::PlatformSessionImpl()
-    : DummySessionDelegateImpl(), _disableASLR(false),
-      _workingDirectory(Platform::GetWorkingDirectory()) {}
+PlatformSessionImplBase::PlatformSessionImplBase()
+    : DummySessionDelegateImpl() {}
 
-ErrorCode PlatformSessionImpl::onQueryProcessList(Session &session,
-                                                  ProcessInfoMatch const &match,
-                                                  bool first,
-                                                  ProcessInfo &info) const {
+ErrorCode PlatformSessionImplBase::onQueryProcessList(
+    Session &session, ProcessInfoMatch const &match, bool first,
+    ProcessInfo &info) const {
   if (first) {
     updateProcesses(match);
   }
@@ -45,22 +43,22 @@ ErrorCode PlatformSessionImpl::onQueryProcessList(Session &session,
   return kSuccess;
 }
 
-ErrorCode PlatformSessionImpl::onQueryProcessInfo(Session &, ProcessId pid,
-                                                  ProcessInfo &info) const {
+ErrorCode PlatformSessionImplBase::onQueryProcessInfo(Session &, ProcessId pid,
+                                                      ProcessInfo &info) const {
   if (!Platform::GetProcessInfo(pid, info))
     return kErrorProcessNotFound;
   else
     return kSuccess;
 }
 
-ErrorCode PlatformSessionImpl::onExecuteProgram(
+ErrorCode PlatformSessionImplBase::onExecuteProgram(
     Session &, std::string const &command, uint32_t timeout,
     std::string const &workingDirectory, ProgramResult &result) {
   DS2LOG(Debug, "command='%s' timeout=%u", command.c_str(), timeout);
 
   ProcessSpawner ps;
 
-  ps.setExecutable(command);
+  ps.setShellCommand(command);
 
   ps.redirectInputToNull();
   ps.redirectOutputToBuffer();
@@ -82,62 +80,27 @@ ErrorCode PlatformSessionImpl::onExecuteProgram(
   return kSuccess;
 }
 
-ErrorCode PlatformSessionImpl::onFileOpen(Session &, std::string const &path,
-                                          uint32_t flags, uint32_t mode,
-                                          int &fd) {
-  if ((fd = Platform::OpenFile(path, flags, mode)) < 0)
-    return Platform::TranslateError();
-  else
-    return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onFileClose(Session &session, int fd) {
-  //
-  // TODO(sas): Would be nice to have a table storing the FDs that were opened
-  // by the debugger to prevent Platform::CloseFile() getting called on
-  // arbitrary file descriptors.
-  //
-  if (!Platform::CloseFile(fd))
-    return Platform::TranslateError();
-  else
-    return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onFileExists(Session &,
-                                            std::string const &path) {
-  if (!Platform::IsFilePresent(path))
-    return kErrorNotFound;
-  else
-    return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onQueryUserName(Session &, UserId const &uid,
-                                               std::string &name) const {
+ErrorCode PlatformSessionImplBase::onQueryUserName(Session &, UserId const &uid,
+                                                   std::string &name) const {
   if (!Platform::GetUserName(uid, name))
     return kErrorNotFound;
   else
     return kSuccess;
 }
 
-ErrorCode PlatformSessionImpl::onQueryGroupName(Session &, GroupId const &gid,
-                                                std::string &name) const {
+ErrorCode PlatformSessionImplBase::onQueryGroupName(Session &,
+                                                    GroupId const &gid,
+                                                    std::string &name) const {
   if (!Platform::GetGroupName(gid, name))
     return kErrorNotFound;
   else
     return kSuccess;
 }
 
-ErrorCode
-PlatformSessionImpl::onQueryWorkingDirectory(Session &,
-                                             std::string &workingDir) const {
-  workingDir = _workingDirectory;
-  return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onLaunchDebugServer(Session &session,
-                                                   std::string const &host,
-                                                   uint16_t &port,
-                                                   ProcessId &pid) {
+ErrorCode PlatformSessionImplBase::onLaunchDebugServer(Session &session,
+                                                       std::string const &host,
+                                                       uint16_t &port,
+                                                       ProcessId &pid) {
   ProcessSpawner ps;
   StringCollection args;
 
@@ -146,8 +109,11 @@ ErrorCode PlatformSessionImpl::onLaunchDebugServer(Session &session,
   if (GetLogLevel() == kLogLevelDebug) {
     args.push_back("--debug");
   } else if (GetLogLevel() == kLogLevelPacket) {
-    args.push_back("--debug-remote");
+    args.push_back("--remote-debug");
   }
+#if defined(OS_POSIX)
+  args.push_back("--setsid");
+#endif
   ps.setArguments(args);
   ps.redirectInputToNull();
   ps.redirectOutputToBuffer();
@@ -170,7 +136,8 @@ ErrorCode PlatformSessionImpl::onLaunchDebugServer(Session &session,
   return kSuccess;
 }
 
-void PlatformSessionImpl::updateProcesses(ProcessInfoMatch const &match) const {
+void PlatformSessionImplBase::updateProcesses(
+    ProcessInfoMatch const &match) const {
   // TODO(fjricci) we should only add processes that match "match"
   Platform::EnumerateProcesses(
       true, UserId(), [&](ds2::ProcessInfo const &info) {
@@ -178,75 +145,6 @@ void PlatformSessionImpl::updateProcesses(ProcessInfoMatch const &match) const {
       });
 
   _processIterationState.it = _processIterationState.vals.begin();
-}
-
-ErrorCode PlatformSessionImpl::onDisableASLR(Session &, bool disable) {
-  _disableASLR = disable;
-  return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onSetEnvironmentVariable(
-    Session &, std::string const &name, std::string const &value) {
-  if (value.empty()) {
-    _environment.erase(name);
-  } else {
-    _environment.insert(std::make_pair(name, value));
-  }
-  return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onSetWorkingDirectory(Session &,
-                                                     std::string const &path) {
-  _workingDirectory = path;
-  return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onSetStdFile(Session &, int fileno,
-                                            std::string const &path) {
-  DS2LOG(Debug, "stdfile[%d] = %s", fileno, path.c_str());
-
-  if (fileno < 0 || fileno > 2)
-    return kErrorInvalidArgument;
-
-  if (fileno == 0) {
-    //
-    // TODO it seems that QSetSTDIN is the first message sent when
-    // launching a new process, it may be sane to invalidate all
-    // the process state at this point.
-    //
-    _disableASLR = false;
-    _arguments.clear();
-    _environment.clear();
-    _workingDirectory.clear();
-    _stdFile[0].clear();
-    _stdFile[1].clear();
-    _stdFile[2].clear();
-  }
-
-  _stdFile[fileno] = path;
-  return kSuccess;
-}
-
-ErrorCode
-PlatformSessionImpl::onSetArchitecture(Session &,
-                                       std::string const &architecture) {
-  // Ignored for now
-  return kSuccess;
-}
-
-ErrorCode
-PlatformSessionImpl::onSetProgramArguments(Session &,
-                                           StringCollection const &args) {
-  _arguments = args;
-  for (auto const &arg : _arguments) {
-    DS2LOG(Debug, "arg=%s", arg.c_str());
-  }
-  return kSuccess;
-}
-
-ErrorCode PlatformSessionImpl::onQueryLaunchSuccess(Session &,
-                                                    ProcessId) const {
-  return kSuccess;
 }
 }
 }

@@ -13,38 +13,49 @@
 
 #include "DebugServer2/BreakpointManager.h"
 
+#include <vector>
+
 namespace ds2 {
 namespace Architecture {
 namespace X86 {
 
 class HardwareBreakpointManager : public BreakpointManager {
 public:
-  HardwareBreakpointManager(Target::Process *process);
+  HardwareBreakpointManager(Target::ProcessBase *process);
   ~HardwareBreakpointManager() override;
 
 public:
-  virtual ErrorCode add(Address const &address, Type type, size_t size,
-                        Mode mode) override {
-    return kErrorUnsupported;
-  };
+  ErrorCode add(Address const &address, Type type, size_t size,
+                Mode mode) override;
+  ErrorCode remove(Address const &address) override;
+
+public:
+  int hit(Target::Thread *thread, Site &site) override;
 
 protected:
-  virtual bool hit(Target::Thread *thread) override { return false; };
-
-protected:
-  virtual ErrorCode enableLocation(Site const &site) override {
-    return kErrorUnsupported;
-  };
-
-  virtual ErrorCode disableLocation(Site const &site) override {
-    return kErrorUnsupported;
-  };
+  ErrorCode enableLocation(Site const &site) override;
+  virtual ErrorCode enableLocation(Site const &site, int idx,
+                                   Target::Thread *thread);
+  ErrorCode disableLocation(Site const &site) override;
+  virtual ErrorCode disableLocation(int idx, Target::Thread *thread);
 
 public:
   virtual int maxWatchpoints();
 
 protected:
-  friend Target::ProcessBase;
+  virtual int getAvailableLocation();
+
+protected:
+  virtual ErrorCode disableDebugCtrlReg(uint32_t &ctrlReg, int idx);
+  virtual ErrorCode enableDebugCtrlReg(uint32_t &ctrlReg, int idx, Mode mode,
+                                       int size);
+
+protected:
+  ErrorCode isValid(Address const &address, size_t size,
+                    Mode mode) const override;
+
+protected:
+  std::vector<uint64_t> _locations;
 };
 }
 }

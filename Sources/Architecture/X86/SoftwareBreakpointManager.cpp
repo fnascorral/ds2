@@ -23,7 +23,8 @@ namespace ds2 {
 namespace Architecture {
 namespace X86 {
 
-SoftwareBreakpointManager::SoftwareBreakpointManager(Target::Process *process)
+SoftwareBreakpointManager::SoftwareBreakpointManager(
+    Target::ProcessBase *process)
     : super(process) {}
 
 SoftwareBreakpointManager::~SoftwareBreakpointManager() { clear(); }
@@ -33,27 +34,19 @@ void SoftwareBreakpointManager::clear() {
   _insns.clear();
 }
 
-ErrorCode SoftwareBreakpointManager::add(Address const &address, Type type,
-                                         size_t size, Mode mode) {
-  DS2ASSERT(size == 0 || size == 1);
-  DS2ASSERT(mode == kModeExec);
-
-  return super::add(address, type, size, mode);
-}
-
-bool SoftwareBreakpointManager::hit(Target::Thread *thread) {
+int SoftwareBreakpointManager::hit(Target::Thread *thread, Site &site) {
   ds2::Architecture::CPUState state;
 
   //
   // Ignore hardware single-stepping.
   //
   if (thread->state() == Target::Thread::kStepped)
-    return true;
+    return 0;
 
   thread->readCPUState(state);
   state.setPC(state.pc() - 1);
 
-  if (super::hit(state.pc())) {
+  if (super::hit(state.pc(), site)) {
     //
     // Move the PC back to the instruction, INT3 will move
     // the instruction pointer to the next byte.
@@ -65,9 +58,9 @@ bool SoftwareBreakpointManager::hit(Target::Thread *thread) {
     thread->readCPUState(state);
     DS2ASSERT(ex == state.pc());
 
-    return true;
+    return 0;
   }
-  return false;
+  return -1;
 }
 
 ErrorCode SoftwareBreakpointManager::enableLocation(Site const &site) {
@@ -77,14 +70,14 @@ ErrorCode SoftwareBreakpointManager::enableLocation(Site const &site) {
 
   error = _process->readMemory(site.address, &old, sizeof(old));
   if (error != kSuccess) {
-    DS2LOG(Error, "cannot enable breakpoint at %#lx",
+    DS2LOG(Error, "cannot enable breakpoint at %#lx, readMemory failed",
            (unsigned long)site.address.value());
     return error;
   }
 
   error = _process->writeMemory(site.address, &opcode, sizeof(opcode));
   if (error != kSuccess) {
-    DS2LOG(Error, "cannot enable breakpoint at %#lx",
+    DS2LOG(Error, "cannot enable breakpoint at %#lx, writeMemory failed",
            (unsigned long)site.address.value());
     return error;
   }
@@ -114,6 +107,14 @@ ErrorCode SoftwareBreakpointManager::disableLocation(Site const &site) {
   _insns.erase(site.address);
 
   return kSuccess;
+}
+
+ErrorCode SoftwareBreakpointManager::isValid(Address const &address,
+                                             size_t size, Mode mode) const {
+  DS2ASSERT(size == 0 || size == 1);
+  DS2ASSERT(mode == kModeExec);
+
+  return super::isValid(address, size, mode);
 }
 }
 }

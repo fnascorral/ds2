@@ -17,33 +17,119 @@
 #include <cstdio>
 #include <windows.h>
 
+#define DS2_EXCEPTION_UNCAUGHT_COM 0x800706BA
+#define DS2_EXCEPTION_UNCAUGHT_USER 0xE06D7363
+#define DS2_EXCEPTION_UNCAUGHT_WINRT 0x40080201
+
 // Some APIs are not exposed when building for UAP.
 #if !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+
+#if !defined(DOXYGEN)
 
 // clang-format off
 extern "C" {
 
 #define UNLEN 256
 
-BOOL WINAPI GetVersionExA(
+WINBASEAPI HANDLE WINAPI CreateRemoteThread(
+  _In_  HANDLE                 hProcess,
+  _In_  LPSECURITY_ATTRIBUTES  lpThreadAttributes,
+  _In_  SIZE_T                 dwStackSize,
+  _In_  LPTHREAD_START_ROUTINE lpStartAddress,
+  _In_  LPVOID                 lpParameter,
+  _In_  DWORD                  dwCreationFlags,
+  _Out_ LPDWORD                lpThreadId
+);
+
+WINBASEAPI BOOL WINAPI GetVersionExA(
   _Inout_  LPOSVERSIONINFOA lpVersionInfo
 );
-BOOL WINAPI GetVersionExW(
+WINBASEAPI BOOL WINAPI GetVersionExW(
   _Inout_  LPOSVERSIONINFOW lpVersionInfo
 );
 #define GetVersionEx GetVersionExW
 
-UINT WINAPI GetWindowsDirectoryA(
+WINBASEAPI UINT WINAPI GetWindowsDirectoryA(
   _Out_ LPSTR  lpBuffer,
   _In_  UINT   uSize
 );
-UINT WINAPI GetWindowsDirectoryW(
+WINBASEAPI UINT WINAPI GetWindowsDirectoryW(
   _Out_ LPWSTR lpBuffer,
   _In_  UINT   uSize
 );
 #define GetWindowsDirectory GetWindowsDirectoryW
 
-BOOL WINAPI LookupAccountSidA(
+#define EnumProcesses K32EnumProcesses
+WINBASEAPI BOOL WINAPI EnumProcesses(
+  _Out_ DWORD *pProcessIds,
+  _In_  DWORD cb,
+  _Out_ DWORD *pBytesReturned
+);
+
+#define EnumProcessModules    K32EnumProcessModules
+#define EnumProcessModulesEx  K32EnumProcessModulesEx
+WINBASEAPI BOOL WINAPI EnumProcessModules(
+  _In_  HANDLE  hProcess,
+  _Out_ HMODULE *lphModule,
+  _In_  DWORD   cb,
+  _Out_ LPDWORD lpcbNeeded
+);
+
+#define GetModuleBaseNameA  K32GetModuleBaseNameA
+#define GetModuleBaseNameW  K32GetModuleBaseNameW
+WINBASEAPI DWORD WINAPI GetModuleBaseNameA(
+  _In_     HANDLE  hProcess,
+  _In_opt_ HMODULE hModule,
+  _Out_    LPSTR   lpBaseName,
+  _In_     DWORD   nSize
+);
+WINBASEAPI DWORD WINAPI GetModuleBaseNameW(
+  _In_     HANDLE  hProcess,
+  _In_opt_ HMODULE hModule,
+  _Out_    LPWSTR  lpBaseName,
+  _In_     DWORD   nSize
+);
+#define GetModuleBaseName GetModuleBaseNameW
+
+#define GetModuleFileNameExA  K32GetModuleFileNameExA
+#define GetModuleFileNameExW  K32GetModuleFileNameExW
+WINBASEAPI DWORD WINAPI GetModuleFileNameExA(
+  _In_     HANDLE  hProcess,
+  _In_opt_ HMODULE hModule,
+  _Out_    LPSTR   lpFilename,
+  _In_     DWORD   nSize
+);
+WINBASEAPI DWORD WINAPI GetModuleFileNameExW(
+  _In_     HANDLE  hProcess,
+  _In_opt_ HMODULE hModule,
+  _Out_    LPWSTR  lpFilename,
+  _In_     DWORD   nSize
+);
+#define GetModuleFileNameEx GetModuleFileNameExW
+
+WINBASEAPI HMODULE WINAPI GetModuleHandleA(
+  _In_opt_ LPCSTR lpModuleName
+);
+WINBASEAPI HMODULE WINAPI GetModuleHandleW(
+  _In_opt_ LPCWSTR lpModuleName
+);
+#define GetModuleHandle GetModuleHandleW
+
+WINBASEAPI BOOL WINAPI OpenProcessToken(
+  _In_  HANDLE  ProcessHandle,
+  _In_  DWORD   DesiredAccess,
+  _Out_ PHANDLE TokenHandle
+);
+
+WINBASEAPI BOOL WINAPI GetTokenInformation(
+  _In_      HANDLE                  TokenHandle,
+  _In_      TOKEN_INFORMATION_CLASS TokenInformationClass,
+  _Out_opt_ LPVOID                  TokenInformation,
+  _In_      DWORD                   TokenInformationLength,
+  _Out_     PDWORD                  ReturnLength
+);
+
+WINBASEAPI BOOL WINAPI LookupAccountSidA(
   _In_opt_  LPCSTR        lpSystemName,
   _In_      PSID          lpSid,
   _Out_opt_ LPSTR         lpName,
@@ -52,7 +138,7 @@ BOOL WINAPI LookupAccountSidA(
   _Inout_   LPDWORD       cchReferencedDomainName,
   _Out_     PSID_NAME_USE peUse
 );
-BOOL WINAPI LookupAccountSidW(
+WINBASEAPI BOOL WINAPI LookupAccountSidW(
   _In_opt_  LPCWSTR       lpSystemName,
   _In_      PSID          lpSid,
   _Out_opt_ LPWSTR        lpName,
@@ -63,90 +149,19 @@ BOOL WINAPI LookupAccountSidW(
 );
 #define LookupAccountSid LookupAccountSidW
 
-#define EnumProcessModules    K32EnumProcessModules
-#define EnumProcessModulesEx  K32EnumProcessModulesEx
-BOOL WINAPI EnumProcessModules(
-  _In_  HANDLE  hProcess,
-  _Out_ HMODULE *lphModule,
-  _In_  DWORD   cb,
-  _Out_ LPDWORD lpcbNeeded
-);
-
-#define GetModuleBaseNameA  K32GetModuleBaseNameA
-#define GetModuleBaseNameW  K32GetModuleBaseNameW
-DWORD WINAPI GetModuleBaseNameA(
-  _In_     HANDLE  hProcess,
-  _In_opt_ HMODULE hModule,
-  _Out_    LPSTR   lpBaseName,
-  _In_     DWORD   nSize
-);
-DWORD WINAPI GetModuleBaseNameW(
-  _In_     HANDLE  hProcess,
-  _In_opt_ HMODULE hModule,
-  _Out_    LPWSTR  lpBaseName,
-  _In_     DWORD   nSize
-);
-#define GetModuleBaseName GetModuleBaseNameW
-
-#define GetModuleFileNameExA  K32GetModuleFileNameExA
-#define GetModuleFileNameExW  K32GetModuleFileNameExW
-DWORD WINAPI GetModuleFileNameExA(
-  _In_     HANDLE  hProcess,
-  _In_opt_ HMODULE hModule,
-  _Out_    LPSTR   lpFilename,
-  _In_     DWORD   nSize
-);
-DWORD WINAPI GetModuleFileNameExW(
-  _In_     HANDLE  hProcess,
-  _In_opt_ HMODULE hModule,
-  _Out_    LPWSTR  lpFilename,
-  _In_     DWORD   nSize
-);
-#define GetModuleFileNameEx GetModuleFileNameExW
-
-HMODULE WINAPI GetModuleHandleA(
-  _In_opt_ LPCSTR lpModuleName
-);
-HMODULE WINAPI GetModuleHandleW(
-  _In_opt_ LPCWSTR lpModuleName
-);
-#define GetModuleHandle GetModuleHandleW
-
-
-BOOL WINAPI OpenProcessToken(
-  _In_  HANDLE  ProcessHandle,
-  _In_  DWORD   DesiredAccess,
-  _Out_ PHANDLE TokenHandle
-);
-
-BOOL WINAPI GetTokenInformation(
-  _In_      HANDLE                  TokenHandle,
-  _In_      TOKEN_INFORMATION_CLASS TokenInformationClass,
-  _Out_opt_ LPVOID                  TokenInformation,
-  _In_      DWORD                   TokenInformationLength,
-  _Out_     PDWORD                  ReturnLength
-);
-
-BOOL WINAPI CopySid(
+WINBASEAPI BOOL WINAPI CopySid(
   _In_  DWORD nDestinationSidLength,
   _Out_ PSID  pDestinationSid,
   _In_  PSID  pSourceSid
 );
 
-DWORD WINAPI GetLengthSid(
+WINBASEAPI DWORD WINAPI GetLengthSid(
   _In_ PSID pSid
 );
 
-#define EnumProcesses K32EnumProcesses
-BOOL WINAPI EnumProcesses(
-  _Out_ DWORD *pProcessIds,
-  _In_  DWORD cb,
-  _Out_ DWORD *pBytesReturned
-);
+WINBASEAPI LPWCH WINAPI GetEnvironmentStringsW(void);
 
-LPWCH WINAPI GetEnvironmentStringsW(void);
-
-BOOL WINAPI FreeEnvironmentStringsW(
+WINBASEAPI BOOL WINAPI FreeEnvironmentStringsW(
   _In_  LPWCH lpszEnvironmentBlock
 );
 
@@ -206,20 +221,7 @@ typedef struct _PROCESS_INFORMATION {
     DWORD  dwThreadId;
 } PROCESS_INFORMATION, *LPPROCESS_INFORMATION;
 
-BOOL WINAPI CreateProcessW(
-  _In_opt_     LPCWSTR lpApplicationName,
-  _Inout_opt_  LPWSTR lpCommandLine,
-  _In_opt_     LPSECURITY_ATTRIBUTES lpProcessAttributes,
-  _In_opt_     LPSECURITY_ATTRIBUTES lpThreadAttributes,
-  _In_         BOOL bInheritHandles,
-  _In_         DWORD dwCreationFlags,
-  _In_opt_     LPVOID lpEnvironment,
-  _In_opt_     LPCWSTR lpCurrentDirectory,
-  _In_         LPSTARTUPINFOW lpStartupInfo,
-  _Out_        LPPROCESS_INFORMATION lpProcessInformation
-);
-
-BOOL WINAPI CreateProcessA(
+WINBASEAPI BOOL WINAPI CreateProcessA(
   _In_opt_     LPCSTR lpApplicationName,
   _Inout_opt_  LPSTR lpCommandLine,
   _In_opt_     LPSECURITY_ATTRIBUTES lpProcessAttributes,
@@ -231,6 +233,19 @@ BOOL WINAPI CreateProcessA(
   _In_         LPSTARTUPINFOA lpStartupInfo,
   _Out_        LPPROCESS_INFORMATION lpProcessInformation
 );
+WINBASEAPI BOOL WINAPI CreateProcessW(
+  _In_opt_     LPCWSTR lpApplicationName,
+  _Inout_opt_  LPWSTR lpCommandLine,
+  _In_opt_     LPSECURITY_ATTRIBUTES lpProcessAttributes,
+  _In_opt_     LPSECURITY_ATTRIBUTES lpThreadAttributes,
+  _In_         BOOL bInheritHandles,
+  _In_         DWORD dwCreationFlags,
+  _In_opt_     LPVOID lpEnvironment,
+  _In_opt_     LPCWSTR lpCurrentDirectory,
+  _In_         LPSTARTUPINFOW lpStartupInfo,
+  _Out_        LPPROCESS_INFORMATION lpProcessInformation
+);
+#define CreateProcess CreateProcessW
 
 WINBASEAPI HANDLE WINAPI CreateThread(
   _In_opt_   LPSECURITY_ATTRIBUTES lpThreadAttributes,
@@ -239,11 +254,6 @@ WINBASEAPI HANDLE WINAPI CreateThread(
   _In_opt_   LPVOID lpParameter,
   _In_       DWORD dwCreationFlags,
   _Out_opt_  LPDWORD lpThreadId
-);
-
-WINBASEAPI BOOL WINAPI GetExitCodeThread(
-  _In_   HANDLE hThread,
-  _Out_  LPDWORD lpExitCode
 );
 
 WINBASEAPI VOID WINAPI ExitThread(
@@ -273,10 +283,6 @@ WINBASEAPI BOOL WINAPI SetThreadContext(
   _In_  const CONTEXT *lpContext
 );
 
-WINBASEAPI DWORD WINAPI SuspendThread(
-  _In_  HANDLE hThread
-);
-
 WINBASEAPI int WINAPI GetThreadPriority(
   _In_  HANDLE hThread
 );
@@ -286,14 +292,12 @@ WINBASEAPI BOOL WINAPI SetThreadPriority(
   _In_  int nPriority
 );
 
-WINBASEAPI DWORD WINAPI GetThreadId(
-  _In_  HANDLE Thread
+WINBASEAPI DWORD WINAPI GetProcessId(
+  _In_ HANDLE Process
 );
 
-HANDLE WINAPI OpenThread(
-  _In_  DWORD dwDesiredAccess,
-  _In_  BOOL bInheritHandle,
-  _In_  DWORD dwThreadId
+WINBASEAPI DWORD WINAPI GetThreadId(
+  _In_  HANDLE Thread
 );
 
 WINBASEAPI HANDLE WINAPI OpenProcess(
@@ -302,16 +306,23 @@ WINBASEAPI HANDLE WINAPI OpenProcess(
   _In_  DWORD dwProcessId
 );
 
-DWORD WINAPI GetProcessId(
-  _In_ HANDLE Process
+WINBASEAPI HANDLE WINAPI OpenThread(
+  _In_  DWORD dwDesiredAccess,
+  _In_  BOOL bInheritHandle,
+  _In_  DWORD dwThreadId
 );
 
-BOOL WINAPI GetExitCodeProcess(
+WINBASEAPI BOOL WINAPI GetExitCodeProcess(
   _In_  HANDLE  hProcess,
   _Out_ LPDWORD lpExitCode
 );
 
-BOOL WINAPI ReadProcessMemory(
+WINBASEAPI BOOL WINAPI GetExitCodeThread(
+  _In_   HANDLE hThread,
+  _Out_  LPDWORD lpExitCode
+);
+
+WINBASEAPI BOOL WINAPI ReadProcessMemory(
   _In_   HANDLE hProcess,
   _In_   LPCVOID lpBaseAddress,
   _Out_  LPVOID lpBuffer,
@@ -319,12 +330,26 @@ BOOL WINAPI ReadProcessMemory(
   _Out_  SIZE_T *lpNumberOfBytesRead
 );
 
-BOOL WINAPI WaitForDebugEvent(
+WINBASEAPI BOOL WINAPI WriteProcessMemory(
+  _In_   HANDLE hProcess,
+  _In_   LPVOID lpBaseAddress,
+  _In_   LPCVOID lpBuffer,
+  _In_   SIZE_T nSize,
+  _Out_  SIZE_T *lpNumberOfBytesWritten
+);
+
+WINBASEAPI BOOL WINAPI FlushInstructionCache(
+  _In_ HANDLE  hProcess,
+  _In_ LPCVOID lpBaseAddress,
+  _In_ SIZE_T  dwSize
+);
+
+WINBASEAPI BOOL WINAPI WaitForDebugEvent(
   _Out_  LPDEBUG_EVENT lpDebugEvent,
   _In_   DWORD dwMilliseconds
 );
 
-BOOL WINAPI ContinueDebugEvent(
+WINBASEAPI BOOL WINAPI ContinueDebugEvent(
   _In_  DWORD dwProcessId,
   _In_  DWORD dwThreadId,
   _In_  DWORD dwContinueStatus
@@ -335,23 +360,15 @@ WINBASEAPI BOOL WINAPI TerminateProcess(
   _In_  UINT uExitCode
 );
 
-BOOL WINAPI WriteProcessMemory(
-  _In_   HANDLE hProcess,
-  _In_   LPVOID lpBaseAddress,
-  _In_   LPCVOID lpBuffer,
-  _In_   SIZE_T nSize,
-  _Out_  SIZE_T *lpNumberOfBytesWritten
-);
-
-BOOL WINAPI DebugActiveProcess(
+WINBASEAPI BOOL WINAPI DebugActiveProcess(
   _In_  DWORD dwProcessId
 );
 
-BOOL WINAPI DebugActiveProcessStop(
+WINBASEAPI BOOL WINAPI DebugActiveProcessStop(
   _In_ DWORD dwProcessId
 );
 
-LPVOID WINAPI VirtualAllocEx(
+WINBASEAPI LPVOID WINAPI VirtualAllocEx(
   _In_     HANDLE hProcess,
   _In_opt_ LPVOID lpAddress,
   _In_     SIZE_T dwSize,
@@ -359,21 +376,11 @@ LPVOID WINAPI VirtualAllocEx(
   _In_     DWORD  flProtect
 );
 
-BOOL WINAPI VirtualFreeEx(
+WINBASEAPI BOOL WINAPI VirtualFreeEx(
   _In_ HANDLE hProcess,
   _In_ LPVOID lpAddress,
   _In_ SIZE_T dwSize,
   _In_ DWORD  dwFreeType
-);
-
-BOOL WINAPI DebugBreakProcess(
-  _In_ HANDLE Process
-);
-
-#define TH32CS_SNAPTHREAD 0x00000004
-HANDLE WINAPI CreateToolhelp32Snapshot(
-  _In_  DWORD dwFlags,
-  _In_  DWORD th32ProcessID
 );
 
 typedef struct tagTHREADENTRY32 {
@@ -385,22 +392,40 @@ typedef struct tagTHREADENTRY32 {
   LONG  tpDeltaPri;
   DWORD dwFlags;
 } THREADENTRY32, *PTHREADENTRY32, *LPTHREADENTRY32;
-BOOL WINAPI Thread32First(
+
+#define TH32CS_SNAPTHREAD 0x00000004
+WINBASEAPI HANDLE WINAPI CreateToolhelp32Snapshot(
+  _In_  DWORD dwFlags,
+  _In_  DWORD th32ProcessID
+);
+
+WINBASEAPI BOOL WINAPI Thread32First(
   _In_     HANDLE hSnapshot,
   _Inout_  LPTHREADENTRY32 lpte
 );
 
-BOOL WINAPI Thread32Next(
+WINBASEAPI BOOL WINAPI Thread32Next(
   _In_   HANDLE hSnapshot,
   _Out_  LPTHREADENTRY32 lpte
 );
 
+typedef LONG (WINAPI *PTOP_LEVEL_EXCEPTION_FILTER)(
+    _In_ struct _EXCEPTION_POINTERS *ExceptionInfo
+    );
+
+typedef PTOP_LEVEL_EXCEPTION_FILTER LPTOP_LEVEL_EXCEPTION_FILTER;
+
+WINBASEAPI LPTOP_LEVEL_EXCEPTION_FILTER WINAPI SetUnhandledExceptionFilter(
+  _In_ LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter
+);
 } // extern "C"
 // clang-format on
 
+#endif // !DOXYGEN
+
 // The following code allows us to pick some symbols directly from kernel32.dll
 // (against which we cannot link when building for WinStore-ARM for instance.
-// The functions are declared in the above block (see DebugBreakProcess for
+// The functions are declared in the above block (see Thread32First for
 // instance), but these declarations are then hidden with macros below.
 // Basically, we just
 //     GetProcAddress(GetModuleHandle("kernel32"), funcName)
@@ -433,7 +458,6 @@ auto CallK32Proc(char const *name, ArgTypes... args)
 
 #define DO_K32_CALL(FUNC, ...) CallK32Proc<decltype(&FUNC)>(#FUNC, __VA_ARGS__)
 
-#define DebugBreakProcess(...) DO_K32_CALL(DebugBreakProcess, __VA_ARGS__)
 #define CreateToolhelp32Snapshot(...)                                          \
   DO_K32_CALL(CreateToolhelp32Snapshot, __VA_ARGS__)
 #define Thread32First(...) DO_K32_CALL(Thread32First, __VA_ARGS__)

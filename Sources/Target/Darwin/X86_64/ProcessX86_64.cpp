@@ -9,7 +9,6 @@
 //
 
 #include "DebugServer2/Target/Process.h"
-#include "DebugServer2/Architecture/X86/SoftwareBreakpointManager.h"
 
 // Include system header files for constants.
 #include <cstdlib>
@@ -45,7 +44,7 @@ static uint8_t const gMunmapCode[] = {
 };
 
 static void PrepareMmapCode(size_t size, uint32_t protection,
-                            U8Vector &codestr) {
+                            ByteVector &codestr) {
   codestr.assign(&gMmapCode[0], &gMmapCode[sizeof(gMmapCode)]);
 
   uint8_t *code = &codestr[0];
@@ -56,7 +55,7 @@ static void PrepareMmapCode(size_t size, uint32_t protection,
 }
 
 static void PrepareMunmapCode(uint64_t address, size_t size,
-                              U8Vector &codestr) {
+                              ByteVector &codestr) {
   codestr.assign(&gMunmapCode[0], &gMunmapCode[sizeof(gMunmapCode)]);
 
   uint8_t *code = &codestr[0];
@@ -75,7 +74,7 @@ ErrorCode Process::allocateMemory(size_t size, uint32_t protection,
   if (error != kSuccess)
     return error;
 
-  U8Vector codestr;
+  ByteVector codestr;
   PrepareMmapCode(size, protection, codestr);
 
   //
@@ -100,7 +99,7 @@ ErrorCode Process::deallocateMemory(uint64_t address, size_t size) {
   if (error != kSuccess)
     return error;
 
-  U8Vector codestr;
+  ByteVector codestr;
   PrepareMunmapCode(address, size, codestr);
 
   //
@@ -115,34 +114,6 @@ ErrorCode Process::deallocateMemory(uint64_t address, size_t size) {
     return kErrorInvalidArgument;
 
   return kSuccess;
-}
-
-SoftwareBreakpointManager *Process::softwareBreakpointManager() const {
-  if (_softwareBreakpointManager == nullptr) {
-    const_cast<Process *>(this)->_softwareBreakpointManager =
-        new Architecture::X86::SoftwareBreakpointManager(
-            reinterpret_cast<Target::Process *>(const_cast<Process *>(this)));
-  }
-
-  return _softwareBreakpointManager;
-}
-
-HardwareBreakpointManager *Process::hardwareBreakpointManager() const {
-  return nullptr;
-}
-
-GDBDescriptor const *Process::getGDBRegistersDescriptor() const {
-  if (_info.pointerSize == sizeof(uint32_t))
-    return &Architecture::X86::GDB;
-  else
-    return &Architecture::X86_64::GDB;
-}
-
-LLDBDescriptor const *Process::getLLDBRegistersDescriptor() const {
-  if (_info.pointerSize == sizeof(uint32_t))
-    return &Architecture::X86::LLDB;
-  else
-    return &Architecture::X86_64::LLDB;
 }
 }
 }

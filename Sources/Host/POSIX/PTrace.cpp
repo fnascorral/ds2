@@ -24,10 +24,6 @@ namespace POSIX {
 #define PTCMD(CMD) PT_##CMD
 #endif
 
-PTrace::PTrace() = default;
-
-PTrace::~PTrace() = default;
-
 ErrorCode PTrace::wait(ProcessThreadId const &ptid, int *status) {
   if (ptid.pid <= kAnyProcessId || !(ptid.tid <= kAnyThreadId))
     return kErrorInvalidArgument;
@@ -35,17 +31,29 @@ ErrorCode PTrace::wait(ProcessThreadId const &ptid, int *status) {
   int stat;
   pid_t wpid = ::waitpid(ptid.pid, &stat, 0);
   if (wpid != ptid.pid) {
-    switch (errno) {
-    case ESRCH:
-      return kErrorProcessNotFound;
-    default:
-      return kErrorInvalidArgument;
-    }
+    return Platform::TranslateError();
   }
 
   if (status != nullptr) {
     *status = stat;
   }
+
+  return kSuccess;
+}
+
+ErrorCode PTrace::traceMe(bool disableASLR) {
+  if (disableASLR) {
+    DS2LOG(Warning, "disabling ASLR not implemented on current plaform");
+  }
+
+#if defined(OS_LINUX)
+  auto cmd = PTRACE_TRACEME;
+#elif defined(OS_FREEBSD) || defined(OS_DARWIN)
+  auto cmd = PT_TRACE_ME;
+#endif
+
+  if (wrapPtrace(cmd, 0, nullptr, nullptr) < 0)
+    return Platform::TranslateError();
 
   return kSuccess;
 }
@@ -56,7 +64,13 @@ ErrorCode PTrace::attach(ProcessId pid) {
 
   DS2LOG(Debug, "attaching to pid %" PRIu64, (uint64_t)pid);
 
-  if (wrapPtrace(PTCMD(ATTACH), pid, nullptr, nullptr) < 0)
+#if defined(OS_LINUX) || defined(OS_FREEBSD)
+  auto cmd = PTCMD(ATTACH);
+#elif defined(OS_DARWIN)
+  auto cmd = PT_ATTACHEXC;
+#endif
+
+  if (wrapPtrace(cmd, pid, nullptr, nullptr) < 0)
     return Platform::TranslateError();
 
   return kSuccess;
@@ -72,6 +86,46 @@ ErrorCode PTrace::detach(ProcessId pid) {
     return Platform::TranslateError();
 
   return kSuccess;
+}
+
+ErrorCode PTrace::suspend(ProcessThreadId const &ptid) {
+  // This will call PTrace::kill, not the kill(2) system call.
+  return kill(ptid, SIGSTOP);
+}
+
+ErrorCode PTrace::doStepResume(bool stepping, ProcessThreadId const &ptid,
+                               int signal, Address const &address) {
+  pid_t pid;
+
+  ErrorCode error = ptidToPid(ptid, pid);
+  if (error != kSuccess)
+    return error;
+
+#if defined(OS_LINUX)
+  // Handling of continuation address is performed in Linux::PTrace.
+  DS2ASSERT(!address.valid());
+  auto res = wrapPtrace(stepping ? PTRACE_SINGLESTEP : PTRACE_CONT, pid,
+                        nullptr, signal);
+#elif defined(OS_FREEBSD) || defined(OS_DARWIN)
+  // (caddr_t)1 indicates that execution is to pick up where it left off.
+  auto res = wrapPtrace(stepping ? PT_STEP : PT_CONTINUE, pid,
+                        address.valid() ? address.value() : 1, signal);
+#endif
+  if (res < 0) {
+    return Platform::TranslateError();
+  }
+
+  return kSuccess;
+}
+
+ErrorCode PTrace::step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
+                       int signal, Address const &address) {
+  return doStepResume(true, ptid, signal, address);
+}
+
+ErrorCode PTrace::resume(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
+                         int signal, Address const &address) {
+  return doStepResume(false, ptid, signal, address);
 }
 
 //
@@ -136,10 +190,6 @@ ErrorCode PTrace::execute(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
 fail:
   kill(ptid, SIGKILL); // we can't really do much at this point :(
   return error;
-}
-
-ErrorCode PTrace::getEventPid(ProcessThreadId const &ptid, ProcessId &pid) {
-  return kErrorUnsupported;
 }
 
 ErrorCode PTrace::ptidToPid(ProcessThreadId const &ptid, pid_t &pid) {

@@ -18,23 +18,12 @@ namespace ds2 {
 namespace Target {
 namespace FreeBSD {
 
-class Process : public ds2::Target::POSIX::ELFProcess {
+class Process : public POSIX::ELFProcess {
 protected:
   Host::FreeBSD::PTrace _ptrace;
-  SoftwareBreakpointManager *_softwareBreakpointManager;
-  HardwareBreakpointManager *_hardwareBreakpointManager;
-  bool _terminated;
 
 protected:
-  friend class POSIX::Process;
-  Process();
-
-public:
-  ~Process() override;
-
-protected:
-  ErrorCode initialize(ProcessId pid, uint32_t flags) override;
-  ErrorCode attach(int waitStatus);
+  ErrorCode attach(int waitStatus) override;
 
 public:
   ErrorCode terminate() override;
@@ -65,13 +54,6 @@ protected:
       std::function<
           void(Support::ELFSupport::AuxiliaryVectorEntry const &)> const &cb);
 
-public:
-  bool isSingleStepSupported() const;
-
-public:
-  SoftwareBreakpointManager *softwareBreakpointManager() const override;
-  HardwareBreakpointManager *hardwareBreakpointManager() const override;
-
 protected:
   friend class Thread;
   ErrorCode readCPUState(ThreadId tid, Architecture::CPUState &state,
@@ -79,18 +61,8 @@ protected:
   ErrorCode writeCPUState(ThreadId tid, Architecture::CPUState const &state,
                           uint32_t flags = 0);
 
-public:
-  ErrorCode readString(Address const &address, std::string &str, size_t length,
-                       size_t *nread = nullptr) override;
-  ErrorCode readMemory(Address const &address, void *data, size_t length,
-                       size_t *count = nullptr) override;
-  ErrorCode writeMemory(Address const &address, void const *data, size_t length,
-                        size_t *count = nullptr) override;
-
-public:
-  Architecture::GDBDescriptor const *getGDBRegistersDescriptor() const override;
-  Architecture::LLDBDescriptor const *
-  getLLDBRegistersDescriptor() const override;
+protected:
+  friend class POSIX::Process;
 };
 }
 }

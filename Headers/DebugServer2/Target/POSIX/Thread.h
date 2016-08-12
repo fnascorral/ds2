@@ -21,6 +21,18 @@ class Thread : public ds2::Target::ThreadBase {
 protected:
   Thread(ds2::Target::Process *process, ThreadId tid);
 
+public:
+  ErrorCode readCPUState(Architecture::CPUState &state) override;
+  ErrorCode writeCPUState(Architecture::CPUState const &state) override;
+
+public:
+  ErrorCode terminate() override;
+  ErrorCode suspend() override;
+
+public:
+  ErrorCode step(int signal = 0, Address const &address = Address()) override;
+  ErrorCode resume(int signal = 0, Address const &address = Address()) override;
+
 protected:
   virtual ErrorCode updateStopInfo(int waitStatus);
 };

@@ -24,22 +24,14 @@ protected:
   friend class Process;
   Thread(Process *process, ThreadId tid);
 
+#if defined(ARCH_X86) || defined(ARCH_X86_64)
 public:
-  ~Thread() override;
+  uintptr_t readDebugReg(size_t idx) const override;
+  ErrorCode writeDebugReg(size_t idx, uintptr_t val) const override;
+#endif
 
-public:
-  ErrorCode terminate() override;
-
-public:
-  ErrorCode suspend() override;
-
-public:
-  ErrorCode step(int signal = 0, Address const &address = Address()) override;
-  ErrorCode resume(int signal = 0, Address const &address = Address()) override;
-
-public:
-  ErrorCode readCPUState(Architecture::CPUState &state) override;
-  ErrorCode writeCPUState(Architecture::CPUState const &state) override;
+protected:
+  void fillWatchpointData();
 
 protected:
   ErrorCode updateStopInfo(int waitStatus) override;

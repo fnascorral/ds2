@@ -15,6 +15,7 @@
 #include "DebugServer2/GDBRemote/SessionDelegate.h"
 #include "DebugServer2/Utils/HexValues.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/String.h"
 #include "DebugServer2/Utils/SwapEndian.h"
 
 #include <cstdlib>
@@ -22,7 +23,7 @@
 #include <iomanip>
 #include <sstream>
 
-#if defined(OS_LINUX) || defined(OS_FREEBSD) || defined(OS_DARWIN)
+#if defined(OS_POSIX)
 #define UNPACK_ID(STR) std::strtoul(STR, nullptr, 10)
 #elif defined(OS_WIN32)
 #define UNPACK_ID(STR) 0
@@ -30,11 +31,13 @@
 #error "Target not supported."
 #endif
 
+#define CHK_SEND(C) CHK_ACTION(C, sendError(CHK_error); return )
+
 namespace ds2 {
 namespace GDBRemote {
 
 Session::Session(CompatibilityMode mode)
-    : _compatMode(mode), _threadsInStopReply(false) {
+    : SessionBase(mode), _threadsInStopReply(false) {
 #define REGISTER_HANDLER_EQUALS_2(MESSAGE, HANDLER)                            \
   interpreter().registerHandler(ProtocolInterpreter::Handler::kModeEquals,     \
                                 MESSAGE, this, &Session::Handle_##HANDLER);
@@ -102,6 +105,7 @@ Session::Session(CompatibilityMode mode)
   REGISTER_HANDLER_EQUALS_1(qAttached);
   REGISTER_HANDLER_EQUALS_1(qC);
   REGISTER_HANDLER_EQUALS_1(qCRC);
+  REGISTER_HANDLER_EQUALS_1(qFileLoadAddress);
   REGISTER_HANDLER_EQUALS_1(qGDBServerVersion);
   REGISTER_HANDLER_EQUALS_1(qGetPid);
   REGISTER_HANDLER_EQUALS_1(qGetProfileData);
@@ -118,8 +122,9 @@ Session::Session(CompatibilityMode mode)
   REGISTER_HANDLER_EQUALS_1(qModuleInfo);
   REGISTER_HANDLER_EQUALS_1(qOffsets);
   REGISTER_HANDLER_EQUALS_1(qP);
-  REGISTER_HANDLER_EQUALS_1(qPlatform_IO_MkDir);
-  REGISTER_HANDLER_EQUALS_1(qPlatform_RunCommand);
+  REGISTER_HANDLER_EQUALS_1(qPlatform_chmod);
+  REGISTER_HANDLER_EQUALS_1(qPlatform_mkdir);
+  REGISTER_HANDLER_EQUALS_1(qPlatform_shell);
   REGISTER_HANDLER_EQUALS_1(qProcessInfo);
   REGISTER_HANDLER_EQUALS_1(qProcessInfoPID);
   REGISTER_HANDLER_EQUALS_1(qRcmd);
@@ -240,6 +245,53 @@ std::string Session::formatAddress(Address const &address,
   return ss.str();
 }
 
+OpenFlags Session::ConvertOpenFlags(uint32_t protocolFlags) {
+  int flags = 0;
+  if (_compatMode == kCompatibilityModeLLDB) {
+    if (protocolFlags & (1u << 0)) // eOpenOptionRead
+      flags |= kOpenFlagRead;
+    if (protocolFlags & (1u << 1)) // eOpenOptionWrite
+      flags |= kOpenFlagWrite;
+    if (flags == 0)
+      return kOpenFlagInvalid;
+
+    if (protocolFlags & (1u << 2)) // eOpenOptionAppend
+      flags |= kOpenFlagAppend;
+    if (protocolFlags & (1u << 3)) // eOpenOptionTruncate
+      flags |= kOpenFlagTruncate;
+    if (protocolFlags & (1u << 4)) // eOpenOptionNonBlocking
+      flags |= kOpenFlagNonBlocking;
+    if (protocolFlags & (1u << 5)) // eOpenOptionCanCreate
+      flags |= kOpenFlagCreate;
+    if (protocolFlags & (1u << 6)) // eOpenOptionCanCreateNewOnly
+      flags |= (kOpenFlagCreate | kOpenFlagNewOnly);
+    if (protocolFlags & (1u << 7)) // eOpenOptionDontFollowSymlinks
+      flags |= kOpenFlagNoFollow;
+    if (protocolFlags & (1u << 8)) // eOpenOptionCloseOnExec
+      flags |= kOpenFlagCloseOnExec;
+  } else {
+    if ((protocolFlags & 0x3) == 0x0) // O_RDONLY
+      flags |= kOpenFlagRead;
+    else if (protocolFlags & 0x1) // O_WRONLY
+      flags |= kOpenFlagWrite;
+    else if (protocolFlags & 0x2) // O_RDWR
+      flags |= (kOpenFlagRead | kOpenFlagWrite);
+    else
+      return kOpenFlagInvalid; // Invalid mode
+
+    if (protocolFlags & 0x8) // O_APPEND
+      flags |= kOpenFlagAppend;
+    if (protocolFlags & 0x200) // O_CREAT
+      flags |= kOpenFlagCreate;
+    if (protocolFlags & 0x400) // O_TRUNC
+      flags |= kOpenFlagTruncate;
+    if (protocolFlags & 0x800) // O_EXCL
+      flags |= kOpenFlagNewOnly;
+  }
+
+  return static_cast<OpenFlags>(flags);
+}
+
 //
 // Packet:        \x03
 // Description:   A Ctrl+C has been issued in the debugger.
@@ -247,16 +299,10 @@ std::string Session::formatAddress(Address const &address,
 //
 void Session::Handle_ControlC(ProtocolInterpreter::Handler const &,
                               std::string const &) {
-  //
   // The delegate should issue a signal to the target process,
   // as such the stop code is returned when the signal has been
   // delivered as part of the waiting process.
-  //
-  ErrorCode error = _delegate->onInterrupt(*this);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onInterrupt(*this));
 }
 
 //
@@ -277,12 +323,7 @@ void Session::Handle_ExclamationMark(ProtocolInterpreter::Handler const &,
 void Session::Handle_QuestionMark(ProtocolInterpreter::Handler const &,
                                   std::string const &) {
   StopInfo stop;
-  ErrorCode error =
-      _delegate->onQueryThreadStopInfo(*this, ProcessThreadId(), stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryThreadStopInfo(*this, ProcessThreadId(), stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -404,11 +445,7 @@ void Session::Handle_bc(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -434,11 +471,7 @@ void Session::Handle_bs(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -498,11 +531,7 @@ void Session::Handle_C(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -554,11 +583,7 @@ void Session::Handle_c(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -678,11 +703,7 @@ void Session::Handle_g(ProtocolInterpreter::Handler const &,
     ptid = _ptids['g'];
   }
 
-  ErrorCode error = _delegate->onReadGeneralRegisters(*this, ptid, regs);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onReadGeneralRegisters(*this, ptid, regs));
 
   std::ostringstream ss;
   for (auto reg : regs) {
@@ -723,11 +744,7 @@ void Session::Handle_H(ProtocolInterpreter::Handler const &,
   //
   // Query if the thread is alive before proceeding.
   //
-  ErrorCode error = _delegate->onThreadIsAlive(*this, ptid);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onThreadIsAlive(*this, ptid));
 
   _ptids[command] = ptid;
   sendOK();
@@ -737,49 +754,57 @@ void Session::Handle_H(ProtocolInterpreter::Handler const &,
 }
 
 //
+// NOTE: This packet has completely different behavior in LLDB and GDB
+//
 // Packet:        I sig[;addr[,nnn]]
 // Description:   Step the remote target by a single clock cycle
 //                at the address specified if any, using the
 //                specified signal.
 // Compatibility: GDB
 //
+// Packet:        I data
+// Description:   Send data to the inferior process. The data
+//                is hex-encoded.
+// Compatibility: LLDB
+//
 void Session::Handle_I(ProtocolInterpreter::Handler const &,
                        std::string const &args) {
-  char *eptr;
-  int signal;
-  Address address;
-  uint32_t ncycles = 1;
+  if (_compatMode == kCompatibilityModeLLDB) {
+    ByteVector data(HexToByteVector(args.data()));
+    CHK_SEND(_delegate->onSendInput(*this, data));
 
-  signal = std::strtol(args.c_str(), &eptr, 16);
-  if (*eptr++ == ';') {
-    parseAddress(address, eptr, &eptr, kEndianNative);
-    if (*eptr++ == ',') {
-      ncycles = std::strtoul(eptr, nullptr, 16); // TODO is it really hex?
+    sendOK();
+  } else {
+    char *eptr;
+    int signal;
+    Address address;
+    uint32_t ncycles = 1;
+
+    signal = std::strtol(args.c_str(), &eptr, 16);
+    if (*eptr++ == ';') {
+      parseAddress(address, eptr, &eptr, kEndianNative);
+      if (*eptr++ == ',') {
+        ncycles = std::strtoul(eptr, nullptr, 16); // TODO is it really hex?
+      }
     }
-  }
 
-  //
-  // Use what previously has been set with H packet.
-  //
-  ThreadResumeAction action;
-  action.action = kResumeActionSingleStepCycleWithSignal;
-  action.signal = signal;
-  action.address = address;
-  action.ncycles = ncycles;
+    //
+    // Use what previously has been set with H packet.
+    //
+    ThreadResumeAction action;
+    action.action = kResumeActionSingleStepCycleWithSignal;
+    action.signal = signal;
+    action.address = address;
+    action.ncycles = ncycles;
 
-  ThreadResumeAction::Collection actions;
-  actions.push_back(action);
+    ThreadResumeAction::Collection actions;
+    actions.push_back(action);
 
-  StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+    StopInfo stop;
+    CHK_SEND(_delegate->onResume(*this, actions, stop));
 
-  send(stop.encode(_compatMode, _threadsInStopReply));
+    send(stop.encode(_compatMode, _threadsInStopReply));
 
-  if (_compatMode != kCompatibilityModeLLDB) {
     //
     // Update the 'c' and 'g' ptids.
     //
@@ -816,11 +841,7 @@ void Session::Handle_i(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -841,12 +862,7 @@ void Session::Handle_jThreadsInfo(ProtocolInterpreter::Handler const &,
                                   std::string const &) {
   StopInfo processStop;
   std::vector<StopInfo> stops;
-  ErrorCode error =
-      _delegate->fetchStopInfoForAllThreads(*this, stops, processStop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->fetchStopInfoForAllThreads(*this, stops, processStop));
 
   if (_compatMode != kCompatibilityModeLLDB) {
     //
@@ -871,11 +887,7 @@ void Session::Handle_jThreadsInfo(ProtocolInterpreter::Handler const &,
 void Session::Handle_k(ProtocolInterpreter::Handler const &,
                        std::string const &) {
   StopInfo stop;
-  ErrorCode error = _delegate->onTerminate(*this, ProcessThreadId(), stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onTerminate(*this, ProcessThreadId(), stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -920,12 +932,7 @@ void Session::Handle__M(ProtocolInterpreter::Handler const &,
   }
 
   Address address;
-  ErrorCode error =
-      _delegate->onAllocateMemory(*this, length, protection, address);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onAllocateMemory(*this, length, protection, address));
 
   std::ostringstream ss;
   ss << std::hex << std::setfill('0') << std::setw(_delegate->getGPRSize() >> 2)
@@ -967,9 +974,9 @@ void Session::Handle_M(ProtocolInterpreter::Handler const &,
     return;
   }
 
-  std::string data(HexToString(eptr));
-  if (data.length() > length) {
-    data = data.substr(0, length);
+  ByteVector data(HexToByteVector(eptr));
+  if (data.size() > length) {
+    data.resize(length);
   }
 
   size_t nwritten = 0;
@@ -985,7 +992,7 @@ void Session::Handle_m(ProtocolInterpreter::Handler const &,
                        std::string const &args) {
   uint64_t address;
   uint64_t length;
-  std::string data;
+  ByteVector data;
   char *eptr;
 
   address = strtoull(args.c_str(), &eptr, 16);
@@ -995,13 +1002,9 @@ void Session::Handle_m(ProtocolInterpreter::Handler const &,
   }
   length = strtoull(eptr, nullptr, 16);
 
-  ErrorCode error = _delegate->onReadMemory(*this, address, length, data);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onReadMemory(*this, address, length, data));
 
-  send(StringToHex(data));
+  send(ToHex(data));
 }
 
 //
@@ -1082,13 +1085,9 @@ void Session::Handle_p(ProtocolInterpreter::Handler const &,
   }
 
   std::string value;
-  ErrorCode error = _delegate->onReadRegisterValue(*this, ptid, regno, value);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onReadRegisterValue(*this, ptid, regno, value));
 
-  send(StringToHex(value));
+  send(ToHex(value));
 }
 
 //
@@ -1183,11 +1182,7 @@ void Session::Handle_QSaveRegisterState(ProtocolInterpreter::Handler const &,
 
   ptid.parse(eptr, kCompatibilityModeLLDBThread);
 
-  ErrorCode error = _delegate->onSaveRegisters(*this, ptid, id);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onSaveRegisters(*this, ptid, id));
 
   std::ostringstream ss;
   ss << id;
@@ -1493,11 +1488,7 @@ void Session::Handle_qAttached(ProtocolInterpreter::Handler const &,
                                std::string const &args) {
   bool attached = false;
   ProcessId pid = strtoull(args.c_str(), nullptr, 16);
-  ErrorCode error = _delegate->onQueryAttached(*this, pid, attached);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryAttached(*this, pid, attached));
 
   send(attached ? "1" : "0");
 }
@@ -1510,11 +1501,7 @@ void Session::Handle_qAttached(ProtocolInterpreter::Handler const &,
 void Session::Handle_qC(ProtocolInterpreter::Handler const &,
                         std::string const &) {
   ProcessThreadId ptid;
-  ErrorCode error = _delegate->onQueryCurrentThread(*this, ptid);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryCurrentThread(*this, ptid));
 
   //
   // LLDB compatibility mode sends only the process id.
@@ -1547,15 +1534,30 @@ void Session::Handle_qCRC(ProtocolInterpreter::Handler const &,
   length = strtoull(eptr, nullptr, 16);
 
   uint32_t crc;
-  ErrorCode error = _delegate->onComputeCRC(*this, address, length, crc);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onComputeCRC(*this, address, length, crc));
 
   std::ostringstream ss;
   ss << std::hex << std::setw(8) << std::setfill('0') << crc;
   send(ss.str());
+}
+
+//
+// Packet:        qFileLoadAddress:<file_path>
+// Description:   Returns the load address of a memory mapped file.
+// Compatibility: LLDB
+//
+void Session::Handle_qFileLoadAddress(ProtocolInterpreter::Handler const &,
+                                      std::string const &args) {
+  if (args.empty()) {
+    sendError(kErrorInvalidArgument);
+    return;
+  }
+
+  Address address;
+  CHK_SEND(
+      _delegate->onQueryFileLoadAddress(*this, HexToString(args), address));
+
+  send(formatAddress(address, kEndianBig));
 }
 
 //
@@ -1566,11 +1568,7 @@ void Session::Handle_qCRC(ProtocolInterpreter::Handler const &,
 void Session::Handle_qGDBServerVersion(ProtocolInterpreter::Handler const &,
                                        std::string const &) {
   ServerVersion version;
-  ErrorCode error = _delegate->onQueryServerVersion(*this, version);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryServerVersion(*this, version));
 
   send(version.encode());
 }
@@ -1583,11 +1581,7 @@ void Session::Handle_qGDBServerVersion(ProtocolInterpreter::Handler const &,
 void Session::Handle_qGetPid(ProtocolInterpreter::Handler const &,
                              std::string const &) {
   ProcessThreadId ptid;
-  ErrorCode error = _delegate->onQueryCurrentThread(*this, ptid);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryCurrentThread(*this, ptid));
 
   std::ostringstream ss;
   ss << std::hex << ptid.pid;
@@ -1610,12 +1604,8 @@ void Session::Handle_qGetProfileData(ProtocolInterpreter::Handler const &,
   });
 
   void *TODO;
-  ErrorCode error =
-      _delegate->onQueryProfileData(*this, ProcessThreadId(), scanType, &TODO);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(
+      _delegate->onQueryProfileData(*this, ProcessThreadId(), scanType, &TODO));
 
   // send(TODO.encode());
 }
@@ -1634,11 +1624,7 @@ void Session::Handle_qGetTIBAddr(ProtocolInterpreter::Handler const &,
   }
 
   Address address;
-  ErrorCode error = _delegate->onQueryTIBAddress(*this, ptid, address);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryTIBAddress(*this, ptid, address));
 
   send(formatAddress(address, kEndianBig));
 }
@@ -1666,12 +1652,7 @@ void Session::Handle_qGetTLSAddr(ProtocolInterpreter::Handler const &,
   uint64_t linkMap = strtoull(eptr, &eptr, 16);
 
   Address address;
-  ErrorCode error =
-      _delegate->onQueryTLSAddress(*this, ptid, offset, linkMap, address);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryTLSAddress(*this, ptid, offset, linkMap, address));
 
   send(formatAddress(address, kEndianBig));
 }
@@ -1688,13 +1669,9 @@ void Session::Handle_qGetWorkingDir(ProtocolInterpreter::Handler const &,
   }
 
   std::string workingDir;
-  ErrorCode error = _delegate->onQueryWorkingDirectory(*this, workingDir);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryWorkingDirectory(*this, workingDir));
 
-  send(StringToHex(workingDir));
+  send(ToHex(workingDir));
 }
 
 //
@@ -1706,13 +1683,9 @@ void Session::Handle_qGroupName(ProtocolInterpreter::Handler const &,
                                 std::string const &args) {
   std::string name;
   UserId uid = UNPACK_ID(args.c_str());
-  ErrorCode error = _delegate->onQueryGroupName(*this, uid, name);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryGroupName(*this, uid, name));
 
-  send(StringToHex(name));
+  send(ToHex(name));
 }
 
 //
@@ -1723,11 +1696,7 @@ void Session::Handle_qGroupName(ProtocolInterpreter::Handler const &,
 void Session::Handle_qHostInfo(ProtocolInterpreter::Handler const &,
                                std::string const &) {
   HostInfo info;
-  ErrorCode error = _delegate->onQueryHostInfo(*this, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryHostInfo(*this, info));
 
   send(info.encode());
 }
@@ -1739,8 +1708,9 @@ void Session::Handle_qHostInfo(ProtocolInterpreter::Handler const &,
 //
 void Session::Handle_qKillSpawnedProcess(ProtocolInterpreter::Handler const &,
                                          std::string const &args) {
+  StopInfo stop;
   ProcessId pid = std::strtoul(args.c_str(), nullptr, 10);
-  sendError(_delegate->onTerminate(*this, pid));
+  sendError(_delegate->onTerminate(*this, pid, stop));
 }
 
 //
@@ -1801,11 +1771,8 @@ void Session::Handle_qLaunchGDBServer(ProtocolInterpreter::Handler const &,
   });
 
   ProcessId pid = 0;
-  ErrorCode error = _delegate->onLaunchDebugServer(*this, host, port, pid);
-  if (error != kSuccess) {
-    //
+  if (_delegate->onLaunchDebugServer(*this, host, port, pid) != kSuccess) {
     // Error is signalled setting port and pid to zero.
-    //
     port = 0;
     pid = 0;
   }
@@ -1852,11 +1819,7 @@ void Session::Handle_qMemoryRegionInfo(ProtocolInterpreter::Handler const &,
 
   uint64_t address = strtoull(args.c_str(), nullptr, 16);
   MemoryRegionInfo info;
-  ErrorCode error = _delegate->onQueryMemoryRegionInfo(*this, address, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryMemoryRegionInfo(*this, address, info));
 
   send(info.encode());
 }
@@ -1874,12 +1837,7 @@ void Session::Handle_qModuleInfo(ProtocolInterpreter::Handler const &,
   std::string triple(HexToString(args.substr(semicolon + 1)));
   SharedLibraryInfo info;
 
-  ErrorCode error =
-      _delegate->onQuerySharedLibraryInfo(*this, path, triple, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQuerySharedLibraryInfo(*this, path, triple, info));
 
   // FIXME: send the actual response.
   sendOK();
@@ -1897,12 +1855,7 @@ void Session::Handle_qOffsets(ProtocolInterpreter::Handler const &,
   Address data;
   bool isSegment = false;
 
-  ErrorCode error =
-      _delegate->onQuerySectionOffsets(*this, text, data, isSegment);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQuerySectionOffsets(*this, text, data, isSegment));
 
   std::ostringstream ss;
   if (text.valid()) {
@@ -1945,22 +1898,18 @@ void Session::Handle_qP(ProtocolInterpreter::Handler const &,
 
   // TODO check remote.c:remote_unpack_thread_info_response()
   std::string desc;
-  ErrorCode error = _delegate->onQueryThreadInfo(*this, ptid, 0, &desc);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryThreadInfo(*this, ptid, 0, &desc));
 
-  send(StringToHex(desc));
+  send(ToHex(desc));
 }
 
 //
-// Packet:        qPlatform_IO_MkDir:mode,path
-// Description:   Creates a directory on the remote target.
+// Packet:        qPlatform_chmod:mode,path
+// Description:   Change permissions of a file on the remote.
 // Compatibility: LLDB
 //
-void Session::Handle_qPlatform_IO_MkDir(ProtocolInterpreter::Handler const &,
-                                        std::string const &args) {
+void Session::Handle_qPlatform_chmod(ProtocolInterpreter::Handler const &,
+                                     std::string const &args) {
   char *eptr;
   uint32_t mode = std::strtoul(args.c_str(), &eptr, 16);
   if (*eptr++ != ',') {
@@ -1969,24 +1918,44 @@ void Session::Handle_qPlatform_IO_MkDir(ProtocolInterpreter::Handler const &,
   }
 
   ErrorCode error =
-      _delegate->onFileCreateDirectory(*this, HexToString(eptr), mode);
-  //
-  // Contrary to normal GDB protocol, we should send
-  // just -1 or 0.
-  //
-  std::ostringstream ss;
-  ss << std::hex << (error != kSuccess ? -1 : 0);
-  send(ss.str());
+      _delegate->onFileSetPermissions(*this, HexToString(eptr), mode);
+  if (error != kSuccess) {
+    sendError(error);
+    return;
+  }
+
+  // Send F + <return code>, which is always 0 on success
+  send("F0");
 }
 
 //
-// Packet:        qPlatform_RunCommand
+// Packet:        qPlatform_mkdir:mode,path
+// Description:   Creates a directory on the remote target.
+// Compatibility: LLDB
+//
+void Session::Handle_qPlatform_mkdir(ProtocolInterpreter::Handler const &,
+                                     std::string const &args) {
+  char *eptr;
+  uint32_t mode = std::strtoul(args.c_str(), &eptr, 16);
+  if (*eptr++ != ',') {
+    sendError(kErrorInvalidArgument);
+    return;
+  }
+
+  CHK_SEND(_delegate->onFileCreateDirectory(*this, HexToString(eptr), mode));
+
+  // Send F + <return code>, which is always 0 on success
+  send("F0");
+}
+
+//
+// Packet:        qPlatform_shell
 // Description:   Execute a command and redirect output to the debugger
 //                using F reply packets.
 // Compatibility: LLDB
 //
-void Session::Handle_qPlatform_RunCommand(ProtocolInterpreter::Handler const &,
-                                          std::string const &args) {
+void Session::Handle_qPlatform_shell(ProtocolInterpreter::Handler const &,
+                                     std::string const &args) {
   size_t comma = args.find(',');
   std::string workingDir;
   std::string command(HexToString(args.substr(0, comma)));
@@ -1994,7 +1963,7 @@ void Session::Handle_qPlatform_RunCommand(ProtocolInterpreter::Handler const &,
   char *eptr;
   uint32_t timeout = std::strtoul(&args[comma + 1], &eptr, 16);
   if (*eptr++ == ',') {
-    workingDir = eptr;
+    workingDir = HexToString(eptr);
   }
 
   ProgramResult result;
@@ -2008,7 +1977,7 @@ void Session::Handle_qPlatform_RunCommand(ProtocolInterpreter::Handler const &,
 
     // F,-1 in case of failure
     std::ostringstream ss;
-    ss << 'F' << ',' << std::hex << 0xffffffff;
+    ss << 'F' << ',' << std::hex << error;
     send(ss.str());
   } else {
     send(result.encode(), true);
@@ -2024,11 +1993,7 @@ void Session::Handle_qPlatform_RunCommand(ProtocolInterpreter::Handler const &,
 void Session::Handle_qProcessInfo(ProtocolInterpreter::Handler const &,
                                   std::string const &) {
   ProcessInfo info;
-  ErrorCode error = _delegate->onQueryProcessInfo(*this, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryProcessInfo(*this, info));
 
   send(info.encode(_compatMode));
 }
@@ -2044,11 +2009,7 @@ void Session::Handle_qProcessInfoPID(ProtocolInterpreter::Handler const &,
   ProcessId pid = std::strtoul(args.c_str(), nullptr, 10);
 
   ProcessInfo info;
-  ErrorCode error = _delegate->onQueryProcessInfo(*this, pid, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryProcessInfo(*this, pid, info));
 
   send(info.encode(_compatMode, true));
 }
@@ -2060,16 +2021,17 @@ void Session::Handle_qProcessInfoPID(ProtocolInterpreter::Handler const &,
 //
 void Session::Handle_qRcmd(ProtocolInterpreter::Handler const &,
                            std::string const &args) {
-  ErrorCode error = _delegate->onExecuteCommand(*this, args);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
+  std::string cmd = HexToString(args);
+
+  // Special-case the exit command, since the handler will not
+  // return from an exit, and we need to send an OK packet.
+  if (cmd == "exit") {
+    sendOK();
+    _delegate->onExitServer(*this);
+    DS2_UNREACHABLE();
   }
 
-  //
-  // No message is sent as a reply since it is sent by the
-  // handled message.
-  //
+  sendError(_delegate->onExecuteCommand(*this, cmd));
 }
 
 //
@@ -2082,11 +2044,7 @@ void Session::Handle_qRegisterInfo(ProtocolInterpreter::Handler const &,
   uint32_t regno = std::strtoul(args.c_str(), nullptr, 16);
 
   RegisterInfo info;
-  ErrorCode error = _delegate->onQueryRegisterInfo(*this, regno, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryRegisterInfo(*this, regno, info));
 
   send(info.encode());
 }
@@ -2205,12 +2163,7 @@ void Session::Handle_qSupported(ProtocolInterpreter::Handler const &,
     }
   });
 
-  ErrorCode error =
-      _delegate->onQuerySupported(*this, remoteFeatures, localFeatures);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQuerySupported(*this, remoteFeatures, localFeatures));
 
   //
   // Build the local features response.
@@ -2282,17 +2235,19 @@ void Session::Handle_qSymbol(ProtocolInterpreter::Handler const &,
     name = HexToString(args.substr(name_begin));
   }
 
-  std::string next;
-  ErrorCode error = _delegate->onQuerySymbol(*this, name, value, next);
-  if (error != kSuccess) {
-    sendError(error);
+  // This is a query packet.
+  if (value.empty() && name.empty()) {
+    sendOK();
     return;
   }
+
+  std::string next;
+  CHK_SEND(_delegate->onQuerySymbol(*this, name, value, next));
 
   if (next.empty()) {
     sendOK();
   } else {
-    send("qSymbol:" + StringToHex(next));
+    send("qSymbol:" + ToHex(next));
   }
 }
 
@@ -2307,11 +2262,7 @@ void Session::Handle_qThreadStopInfo(ProtocolInterpreter::Handler const &,
   ptid.tid = strtoull(args.c_str(), nullptr, 16);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onQueryThreadStopInfo(*this, ptid, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryThreadStopInfo(*this, ptid, stop));
 
   if (_compatMode != kCompatibilityModeLLDB) {
     //
@@ -2321,11 +2272,7 @@ void Session::Handle_qThreadStopInfo(ProtocolInterpreter::Handler const &,
   }
 
   JSArray threadsStopInfo;
-  error = _delegate->createThreadsStopInfo(*this, threadsStopInfo);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->createThreadsStopInfo(*this, threadsStopInfo));
 
   send(stop.encodeWithAllThreads(_compatMode, threadsStopInfo));
 }
@@ -2349,13 +2296,9 @@ void Session::Handle_qThreadExtraInfo(ProtocolInterpreter::Handler const &,
   }
 
   std::string desc;
-  ErrorCode error = _delegate->onQueryThreadInfo(*this, ptid, 0, &desc);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryThreadInfo(*this, ptid, 0, &desc));
 
-  send(StringToHex(desc));
+  send(ToHex(desc));
 }
 
 //
@@ -2380,13 +2323,9 @@ void Session::Handle_qUserName(ProtocolInterpreter::Handler const &,
                                std::string const &args) {
   std::string name;
   UserId uid = UNPACK_ID(args.c_str());
-  ErrorCode error = _delegate->onQueryUserName(*this, uid, name);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryUserName(*this, uid, name));
 
-  send(StringToHex(name));
+  send(ToHex(name));
 }
 
 //
@@ -2408,11 +2347,7 @@ void Session::Handle_qVAttachOrWaitSupported(
 void Session::Handle_qWatchpointSupportInfo(
     ProtocolInterpreter::Handler const &, std::string const &) {
   size_t count = 0;
-  ErrorCode error = _delegate->onQueryHardwareWatchpointCount(*this, count);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryHardwareWatchpointCount(*this, count));
 
   std::ostringstream ss;
   ss << "num:" << count << ";";
@@ -2469,12 +2404,8 @@ void Session::Handle_qXfer(ProtocolInterpreter::Handler const &,
 
     size_t nwritten = 0;
 
-    ErrorCode error = _delegate->onXferWrite(*this, object, annex, offset,
-                                             args.substr(data_start), nwritten);
-    if (error != kSuccess) {
-      sendError(error);
-      return;
-    }
+    CHK_SEND(_delegate->onXferWrite(*this, object, annex, offset,
+                                    args.substr(data_start), nwritten));
 
     //
     // Send number of written bytes on success.
@@ -2500,12 +2431,8 @@ void Session::Handle_qXfer(ProtocolInterpreter::Handler const &,
     bool last = true;
     std::string buffer;
 
-    ErrorCode error = _delegate->onXferRead(*this, object, annex, offset,
-                                            length, buffer, last);
-    if (error != kSuccess) {
-      sendError(error);
-      return;
-    }
+    CHK_SEND(_delegate->onXferRead(*this, object, annex, offset, length, buffer,
+                                   last));
 
     send((last || buffer.empty() ? "l" : "m") + buffer);
   } else {
@@ -2560,11 +2487,7 @@ void Session::Handle_qfProcessInfo(ProtocolInterpreter::Handler const &,
   });
 
   ProcessInfo info;
-  ErrorCode error = _delegate->onQueryProcessList(*this, match, true, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onQueryProcessList(*this, match, true, info));
 
   send(info.encode(_compatMode, true));
 }
@@ -2577,12 +2500,8 @@ void Session::Handle_qfProcessInfo(ProtocolInterpreter::Handler const &,
 void Session::Handle_qsProcessInfo(ProtocolInterpreter::Handler const &,
                                    std::string const &) {
   ProcessInfo info;
-  ErrorCode error =
-      _delegate->onQueryProcessList(*this, ProcessInfoMatch(), false, info);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(
+      _delegate->onQueryProcessList(*this, ProcessInfoMatch(), false, info));
 
   send(info.encode(_compatMode, true));
 }
@@ -2606,8 +2525,8 @@ void Session::Handle_qfThreadInfo(ProtocolInterpreter::Handler const &,
     send("l");
   } else {
     std::ostringstream ss;
-    ss << std::hex << tid;
-    send("m" + ss.str());
+    ss << "m" << getPacketSeparator() << std::hex << tid;
+    send(ss.str());
   }
 }
 
@@ -2630,8 +2549,8 @@ void Session::Handle_qsThreadInfo(ProtocolInterpreter::Handler const &,
     send("l");
   } else {
     std::ostringstream ss;
-    ss << std::hex << tid;
-    send("m" + ss.str());
+    ss << "m" << getPacketSeparator() << std::hex << tid;
+    send(ss.str());
   }
 }
 
@@ -2703,11 +2622,7 @@ void Session::Handle_S(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -2759,11 +2674,7 @@ void Session::Handle_s(ProtocolInterpreter::Handler const &,
   actions.push_back(action);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -2814,12 +2725,8 @@ void Session::Handle_t(ProtocolInterpreter::Handler const &,
   uint32_t mask = std::strtoul(eptr, &eptr, 16);
 
   Address location;
-  ErrorCode error =
-      _delegate->onSearchBackward(*this, address, pattern, mask, location);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(
+      _delegate->onSearchBackward(*this, address, pattern, mask, location));
 
   send(formatAddress(location, kEndianBig));
 }
@@ -2833,11 +2740,7 @@ void Session::Handle_vAttach(ProtocolInterpreter::Handler const &,
                              std::string const &args) {
   StopInfo stop;
   ProcessId pid = std::strtoul(args.c_str(), nullptr, 16);
-  ErrorCode error = _delegate->onAttach(*this, pid, kAttachNow, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onAttach(*this, pid, kAttachNow, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -2857,12 +2760,7 @@ void Session::Handle_vAttach(ProtocolInterpreter::Handler const &,
 void Session::Handle_vAttachName(ProtocolInterpreter::Handler const &,
                                  std::string const &args) {
   StopInfo stop;
-  ErrorCode error =
-      _delegate->onAttach(*this, HexToString(args), kAttachNow, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onAttach(*this, HexToString(args), kAttachNow, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -2883,12 +2781,7 @@ void Session::Handle_vAttachName(ProtocolInterpreter::Handler const &,
 void Session::Handle_vAttachOrWait(ProtocolInterpreter::Handler const &,
                                    std::string const &args) {
   StopInfo stop;
-  ErrorCode error =
-      _delegate->onAttach(*this, HexToString(args), kAttachOrWait, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onAttach(*this, HexToString(args), kAttachOrWait, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -2908,12 +2801,7 @@ void Session::Handle_vAttachOrWait(ProtocolInterpreter::Handler const &,
 void Session::Handle_vAttachWait(ProtocolInterpreter::Handler const &,
                                  std::string const &args) {
   StopInfo stop;
-  ErrorCode error =
-      _delegate->onAttach(*this, HexToString(args), kAttachAndWait, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onAttach(*this, HexToString(args), kAttachAndWait, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -2990,11 +2878,7 @@ void Session::Handle_vCont(ProtocolInterpreter::Handler const &,
   }
 
   StopInfo stop;
-  ErrorCode error = _delegate->onResume(*this, actions, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onResume(*this, actions, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -3026,6 +2910,11 @@ void Session::Handle_vFile(ProtocolInterpreter::Handler const &,
   std::string op = args.substr(op_start, op_end);
   op_end++;
 
+  // lldb encodes count and fd's in decimal, gdb encodes them in hex
+  int base = (_compatMode == kCompatibilityModeLLDB) ? 10 : 16;
+  auto baseModifier =
+      (_compatMode == kCompatibilityModeLLDB) ? std::dec : std::hex;
+
   //
   // GDB:  vFile:open:path,flags,mode
   //       vFile:close:fd
@@ -3052,19 +2941,26 @@ void Session::Handle_vFile(ProtocolInterpreter::Handler const &,
       sendError(kErrorInvalidArgument);
       return;
     }
+
+    OpenFlags openFlags = ConvertOpenFlags(flags);
+    if (openFlags == kOpenFlagInvalid) {
+      sendError(kErrorInvalidArgument);
+      return;
+    }
+
     uint32_t mode = std::strtoul(eptr, nullptr, 16);
 
     int fd;
     error = _delegate->onFileOpen(
-        *this, HexToString(args.substr(op_end, comma - op_end)), flags, mode,
-        fd);
+        *this, HexToString(args.substr(op_end, comma - op_end)), openFlags,
+        mode, fd);
     if (error != kSuccess) {
       ss << 'F' << -1 << ',' << std::hex << error;
     } else {
-      ss << 'F' << 0 << ';' << std::hex << fd;
+      ss << 'F' << baseModifier << fd;
     }
   } else if (op == "close") {
-    int fd = std::strtol(&args[op_end], nullptr, 16);
+    int fd = std::strtol(&args[op_end], nullptr, base);
     error = _delegate->onFileClose(*this, fd);
     if (error != kSuccess) {
       ss << 'F' << -1 << ',' << std::hex << error;
@@ -3073,47 +2969,51 @@ void Session::Handle_vFile(ProtocolInterpreter::Handler const &,
     }
   } else if (op == "pread") {
     char *eptr;
-    int fd = std::strtol(&args[op_end], &eptr, 16);
+    int fd = std::strtol(&args[op_end], &eptr, base);
     if (*eptr++ != ',') {
       sendError(kErrorInvalidArgument);
       return;
     }
-    uint64_t count = strtoull(eptr, &eptr, 16);
+    uint64_t count = strtoull(eptr, &eptr, base);
     if (*eptr++ != ',') {
       sendError(kErrorInvalidArgument);
       return;
     }
-    uint64_t offset = strtoull(eptr, &eptr, 16);
+    uint64_t offset = strtoull(eptr, &eptr, base);
 
-    std::string buffer;
+    ByteVector buffer;
     ErrorCode error = _delegate->onFileRead(*this, fd, count, offset, buffer);
     if (error != kSuccess) {
       ss << 'F' << -1 << ',' << std::hex << error;
     } else {
-      ss << 'F' << 0 << ';' << Escape(buffer);
+      ss << 'F' << baseModifier << count << ';' << Escape(buffer);
       escaped = true;
     }
   } else if (op == "pwrite") {
     char *eptr;
-    int fd = std::strtol(&args[op_end], &eptr, 16);
+    int fd = std::strtol(&args[op_end], &eptr, base);
     if (*eptr++ != ',') {
       sendError(kErrorInvalidArgument);
       return;
     }
-    uint64_t offset = strtoull(eptr, &eptr, 16);
+    uint64_t offset = strtoull(eptr, &eptr, base);
     if (*eptr++ != ',') {
       sendError(kErrorInvalidArgument);
       return;
     }
 
-    size_t nwritten;
-    size_t length = args.length() - (eptr - args.c_str());
+    auto bytePtr = reinterpret_cast<uint8_t *>(eptr);
+    uint64_t length = args.length() - (eptr - args.c_str());
+    if (length == 0) {
+      sendError(kErrorInvalidArgument);
+      return;
+    }
     ErrorCode error = _delegate->onFileWrite(
-        *this, fd, offset, std::string(eptr, length), nwritten);
+        *this, fd, offset, ByteVector(bytePtr, bytePtr + length), length);
     if (error != kSuccess) {
       ss << 'F' << -1 << ',' << std::hex << error;
     } else {
-      ss << 'F' << 0 << ';' << std::hex << nwritten;
+      ss << 'F' << baseModifier << length;
     }
   } else if (op == "unlink") {
     error = _delegate->onFileRemove(*this, HexToString(&args[op_end]));
@@ -3129,7 +3029,7 @@ void Session::Handle_vFile(ProtocolInterpreter::Handler const &,
     if (error != kSuccess) {
       ss << 'F' << -1 << ',' << std::hex << error;
     } else {
-      ss << 'F' << 0 << ';' << StringToHex(resolved);
+      ss << 'F' << 0 << ';' << ToHex(resolved);
     }
   } else if (op == "exists") {
     error = _delegate->onFileExists(*this, HexToString(&args[op_end]));
@@ -3152,7 +3052,7 @@ void Session::Handle_vFile(ProtocolInterpreter::Handler const &,
     uint64_t size;
     error = _delegate->onFileGetSize(*this, HexToString(&args[op_end]), size);
     // Fsize or Exx if error.
-    ss << 'F' << std::hex << size;
+    ss << 'F' << baseModifier << size;
   } else {
     sendError(kErrorUnsupported);
     return;
@@ -3214,8 +3114,9 @@ void Session::Handle_vFlashWrite(ProtocolInterpreter::Handler const &,
     return;
   }
 
-  ErrorCode error =
-      _delegate->onFlashWrite(*this, address, std::string(eptr, length));
+  auto bytePtr = reinterpret_cast<uint8_t *>(eptr);
+  ErrorCode error = _delegate->onFlashWrite(
+      *this, address, ByteVector(bytePtr, bytePtr + length));
   if (error == kErrorInvalidAddress) {
     send("E.memtype");
   } else {
@@ -3233,11 +3134,7 @@ void Session::Handle_vKill(ProtocolInterpreter::Handler const &,
   ProcessId pid = std::strtoul(args.c_str(), nullptr, 16);
 
   StopInfo stop;
-  ErrorCode error = _delegate->onTerminate(*this, pid, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onTerminate(*this, pid, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -3269,11 +3166,7 @@ void Session::Handle_vRun(ProtocolInterpreter::Handler const &,
   });
 
   StopInfo stop;
-  ErrorCode error = _delegate->onRunAttach(*this, filename, arguments, stop);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onRunAttach(*this, filename, arguments, stop));
 
   send(stop.encode(_compatMode, _threadsInStopReply));
 
@@ -3337,12 +3230,9 @@ void Session::Handle_X(ProtocolInterpreter::Handler const &,
   }
 
   size_t nwritten = 0;
-  ErrorCode error = _delegate->onWriteMemory(
-      *this, address, std::string(eptr, length), nwritten);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  auto bytePtr = reinterpret_cast<uint8_t *>(eptr);
+  CHK_SEND(_delegate->onWriteMemory(
+      *this, address, ByteVector(bytePtr, bytePtr + length), nwritten));
 
   std::ostringstream ss;
   ss << std::hex << nwritten;
@@ -3359,7 +3249,7 @@ void Session::Handle_x(ProtocolInterpreter::Handler const &,
   char *eptr;
   uint64_t address;
   uint64_t length;
-  std::string data;
+  ByteVector data;
 
   address = strtoull(args.c_str(), &eptr, 16);
   if (*eptr++ != ',') {
@@ -3373,11 +3263,7 @@ void Session::Handle_x(ProtocolInterpreter::Handler const &,
     return;
   }
 
-  ErrorCode error = _delegate->onReadMemory(*this, address, length, data);
-  if (error != kSuccess) {
-    sendError(error);
-    return;
-  }
+  CHK_SEND(_delegate->onReadMemory(*this, address, length, data));
 
   send(data);
 }

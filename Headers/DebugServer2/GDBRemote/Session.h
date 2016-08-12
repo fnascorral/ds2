@@ -23,14 +23,10 @@ namespace GDBRemote {
 class Session : public SessionBase {
 protected:
   std::map<char, ProcessThreadId> _ptids;
-  CompatibilityMode _compatMode;
   bool _threadsInStopReply;
 
 public:
   Session(CompatibilityMode mode);
-
-public:
-  CompatibilityMode mode() const override { return _compatMode; }
 
 private:
   void Handle_ControlC(ProtocolInterpreter::Handler const &,
@@ -117,6 +113,8 @@ private:
                         std::string const &);
   void Handle_qC(ProtocolInterpreter::Handler const &, std::string const &);
   void Handle_qCRC(ProtocolInterpreter::Handler const &, std::string const &);
+  void Handle_qFileLoadAddress(ProtocolInterpreter::Handler const &,
+                               std::string const &);
   void Handle_qGDBServerVersion(ProtocolInterpreter::Handler const &,
                                 std::string const &);
   void Handle_qGetPid(ProtocolInterpreter::Handler const &,
@@ -147,10 +145,12 @@ private:
   void Handle_qOffsets(ProtocolInterpreter::Handler const &,
                        std::string const &);
   void Handle_qP(ProtocolInterpreter::Handler const &, std::string const &);
-  void Handle_qPlatform_IO_MkDir(ProtocolInterpreter::Handler const &,
-                                 std::string const &);
-  void Handle_qPlatform_RunCommand(ProtocolInterpreter::Handler const &,
-                                   std::string const &);
+  void Handle_qPlatform_chmod(ProtocolInterpreter::Handler const &,
+                              std::string const &);
+  void Handle_qPlatform_mkdir(ProtocolInterpreter::Handler const &,
+                              std::string const &);
+  void Handle_qPlatform_shell(ProtocolInterpreter::Handler const &,
+                              std::string const &);
   void Handle_qProcessInfo(ProtocolInterpreter::Handler const &,
                            std::string const &);
   void Handle_qProcessInfoPID(ProtocolInterpreter::Handler const &,
@@ -230,6 +230,9 @@ private:
 private:
   static bool ParseList(std::string const &string, char separator,
                         std::function<void(std::string const &)> const &cb);
+
+private:
+  OpenFlags ConvertOpenFlags(uint32_t protocolFlags);
 
 private:
   bool parseAddress(Address &address, const char *ptr, char **eptr,

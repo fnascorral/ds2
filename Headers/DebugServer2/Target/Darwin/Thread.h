@@ -26,30 +26,26 @@ namespace Darwin {
 
 class Thread : public ds2::Target::POSIX::Thread {
 protected:
-  friend class Process;
-  Thread(Process *process, ThreadId tid);
   int _lastSyscallNumber;
 
-public:
-  virtual ~Thread();
-
-public:
-  virtual ErrorCode terminate();
-
-public:
-  virtual ErrorCode suspend();
-
-public:
-  virtual ErrorCode step(int signal = 0, Address const &address = Address());
-  virtual ErrorCode resume(int signal = 0, Address const &address = Address());
-
-public:
-  virtual ErrorCode readCPUState(Architecture::CPUState &state);
-  virtual ErrorCode writeCPUState(Architecture::CPUState const &state);
+protected:
+  friend class Process;
+  Thread(Process *process, ThreadId tid);
 
 protected:
-  virtual ErrorCode updateStopInfo(int waitStatus);
-  virtual void updateState();
+  ErrorCode updateStopInfo(int waitStatus) override;
+  void updateState() override;
+
+public:
+  virtual ErrorCode step(int signal,
+                         Address const &address = Address()) override;
+
+public:
+  virtual ErrorCode afterResume();
+
+public:
+  virtual ErrorCode readCPUState(Architecture::CPUState &state) override;
+  virtual ErrorCode writeCPUState(Architecture::CPUState const &state) override;
 
 private:
   void updateState(bool force);

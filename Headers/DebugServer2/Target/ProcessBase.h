@@ -17,6 +17,7 @@
 #include "DebugServer2/Target/ThreadBase.h"
 
 #include <functional>
+#include <memory>
 #include <set>
 
 namespace ds2 {
@@ -24,10 +25,11 @@ namespace Target {
 
 class ProcessBase {
 public:
-  enum { kFlagNewProcess = 0, kFlagAttachedProcess = (1 << 0) };
+  enum { kFlagNewProcess = (1 << 0), kFlagAttachedProcess = (1 << 1) };
   typedef std::map<ThreadId, Thread *> IdentityMap;
 
 protected:
+  bool _terminated;
   uint32_t _flags;
   ProcessId _pid;
   ProcessInfo _info;
@@ -35,11 +37,11 @@ protected:
   Address _entryPoint;
   IdentityMap _threads;
   Thread *_currentThread;
+  mutable std::unique_ptr<SoftwareBreakpointManager> _softwareBreakpointManager;
+  mutable std::unique_ptr<HardwareBreakpointManager> _hardwareBreakpointManager;
 
 protected:
   ProcessBase();
-
-public:
   virtual ~ProcessBase();
 
 public:
@@ -98,11 +100,17 @@ public:
                                 size_t length, size_t *nwritten = nullptr) = 0;
 
 public:
+  virtual ErrorCode enumerateSharedLibraries(
+      std::function<void(SharedLibraryInfo const &)> const &cb) = 0;
+  virtual ErrorCode
+  enumerateMappedFiles(std::function<void(MappedFileInfo const &)> const &cb);
+
+public:
   ErrorCode readMemoryBuffer(Address const &address, size_t length,
-                             std::string &buffer);
-  ErrorCode writeMemoryBuffer(Address const &address, std::string const &buffer,
+                             ByteVector &buffer);
+  ErrorCode writeMemoryBuffer(Address const &address, ByteVector const &buffer,
                               size_t *nwritten = nullptr);
-  ErrorCode writeMemoryBuffer(Address const &address, std::string const &buffer,
+  ErrorCode writeMemoryBuffer(Address const &address, ByteVector const &buffer,
                               size_t length, size_t *nwritten = nullptr);
 
 public:
@@ -124,11 +132,8 @@ protected:
   virtual ErrorCode updateInfo() = 0;
 
 public:
-  virtual SoftwareBreakpointManager *softwareBreakpointManager() const = 0;
-  virtual HardwareBreakpointManager *hardwareBreakpointManager() const = 0;
-
-public:
-  virtual bool isELFProcess() const = 0;
+  virtual SoftwareBreakpointManager *softwareBreakpointManager() const final;
+  virtual HardwareBreakpointManager *hardwareBreakpointManager() const final;
 
 public:
   virtual void prepareForDetach();
@@ -136,10 +141,16 @@ public:
   virtual ErrorCode afterResume();
 
 public:
+  virtual int getMaxBreakpoints() const { return 0; }
+  virtual int getMaxWatchpoints() const { return 0; }
+  virtual int getMaxWatchpointSize() const { return 0; }
+
+public:
+  // There shouldn't be any reason for these to be overridden.
   virtual Architecture::GDBDescriptor const *
-  getGDBRegistersDescriptor() const = 0;
+  getGDBRegistersDescriptor() const final;
   virtual Architecture::LLDBDescriptor const *
-  getLLDBRegistersDescriptor() const = 0;
+  getLLDBRegistersDescriptor() const final;
 
 protected:
   friend class ThreadBase;

@@ -27,7 +27,8 @@ protected:
     kRedirectNull,
     kRedirectFile,
     kRedirectBuffer,
-    kRedirectDelegate
+    kRedirectDelegate,
+    kRedirectTerminal,
   };
 
   typedef std::function<void(void *buf, size_t size)> RedirectDelegate;
@@ -53,6 +54,7 @@ protected:
   int _exitStatus;
   int _signalCode;
   ProcessId _pid;
+  bool _shell;
 
 public:
   ProcessSpawner();
@@ -60,6 +62,7 @@ public:
 
 public:
   bool setExecutable(std::string const &path);
+  bool setShellCommand(std::string const &command);
   bool setWorkingDirectory(std::string const &path);
 
 public:
@@ -94,6 +97,9 @@ public:
   bool redirectErrorToBuffer();
 
 public:
+  bool redirectInputToTerminal();
+
+public:
   bool redirectOutputToDelegate(RedirectDelegate delegate);
   bool redirectErrorToDelegate(RedirectDelegate delegate);
 
@@ -109,6 +115,7 @@ public:
   inline int signalCode() const { return _signalCode; }
 
 public:
+  ErrorCode input(ByteVector const &buf);
   inline std::string const &output() const { return _outputBuffer; }
 
 private:

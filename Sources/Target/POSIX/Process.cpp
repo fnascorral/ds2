@@ -13,7 +13,7 @@
 #include "DebugServer2/Target/Process.h"
 #include "DebugServer2/BreakpointManager.h"
 #include "DebugServer2/Host/POSIX/PTrace.h"
-#include "DebugServer2/Target/POSIX/Process.h"
+#include "DebugServer2/Target/Thread.h"
 #include "DebugServer2/Utils/Log.h"
 
 #include <cerrno>
@@ -23,35 +23,47 @@
 
 using ds2::Host::ProcessSpawner;
 
+#define super ds2::Target::ProcessBase
+
 namespace ds2 {
 namespace Target {
 namespace POSIX {
 
-Process::Process() : Target::ProcessBase() {}
+ErrorCode Process::initialize(ProcessId pid, uint32_t flags) {
+  ErrorCode error;
 
-Process::~Process() = default;
+  // Wait the main thread.
+  int status;
+  error = ptrace().wait(pid, &status);
+  if (error != kSuccess) {
+    return error;
+  }
+
+  error = ptrace().traceThat(pid);
+  if (error != kSuccess) {
+    return error;
+  }
+
+  error = super::initialize(pid, flags);
+  if (error != kSuccess) {
+    return error;
+  }
+
+  return attach(status);
+}
 
 ErrorCode Process::detach() {
   prepareForDetach();
-  ErrorCode error = ptrace().detach(_pid);
-  if (error == kSuccess) {
-    cleanup();
-    _flags &= ~kFlagAttachedProcess;
-  }
-  return error;
+
+  CHK(ptrace().detach(_pid));
+
+  cleanup();
+  _flags &= ~kFlagAttachedProcess;
+
+  return kSuccess;
 }
 
-ErrorCode Process::interrupt() {
-  //
-  // Depending on the passthru state of signal SIGINT, deliver either
-  // SIGINT or SIGTRAP.
-  //
-  int signal = SIGTRAP;
-  if (_passthruSignals.find(SIGINT) != _passthruSignals.end()) {
-    signal = SIGINT;
-  }
-  return ptrace().kill(_pid, signal);
-}
+ErrorCode Process::interrupt() { return ptrace().kill(_pid, SIGSTOP); }
 
 ErrorCode Process::terminate() {
   // We have to use SIGKILL here, for two (related) reasons:
@@ -66,17 +78,20 @@ bool Process::isAlive() const { return (_pid > 0 && ::kill(_pid, 0) == 0); }
 
 ErrorCode Process::readString(Address const &address, std::string &str,
                               size_t length, size_t *count) {
-  return ptrace().readString(_pid, address, str, length, count);
+  auto id = _currentThread == nullptr ? _pid : _currentThread->tid();
+  return ptrace().readString(id, address, str, length, count);
 }
 
 ErrorCode Process::readMemory(Address const &address, void *data, size_t length,
                               size_t *count) {
-  return ptrace().readMemory(_pid, address, data, length, count);
+  auto id = _currentThread == nullptr ? _pid : _currentThread->tid();
+  return ptrace().readMemory(id, address, data, length, count);
 }
 
 ErrorCode Process::writeMemory(Address const &address, void const *data,
                                size_t length, size_t *count) {
-  return ptrace().writeMemory(_pid, address, data, length, count);
+  auto id = _currentThread == nullptr ? _pid : _currentThread->tid();
+  return ptrace().writeMemory(id, address, data, length, count);
 }
 
 ErrorCode Process::wait() { return ptrace().wait(_pid, nullptr); }
@@ -85,69 +100,43 @@ ds2::Target::Process *Process::Attach(ProcessId pid) {
   if (pid <= 0)
     return nullptr;
 
-  //
-  // Create the process.
-  //
-  auto process = new Target::Process;
+  auto process = ds2::make_unique<Target::Process>();
 
-  //
-  // And try to attach.
-  //
-  ErrorCode error = process->ptrace().attach(pid);
-  if (error != kSuccess) {
+  if (process->ptrace().attach(pid) != kSuccess) {
     DS2LOG(Error, "ptrace attach failed: %s", strerror(errno));
-    goto fail;
+    return nullptr;
   }
 
-  error = process->initialize(pid, kFlagAttachedProcess);
-  if (error != kSuccess) {
+  if (process->initialize(pid, kFlagAttachedProcess) != kSuccess) {
     process->ptrace().detach(pid);
-    goto fail;
+    return nullptr;
   }
 
-  return process;
-
-fail:
-  delete process;
-  return nullptr;
+  return process.release();
 }
 
 ds2::Target::Process *Process::Create(ProcessSpawner &spawner) {
-  ErrorCode error;
-  pid_t pid;
+  auto process = ds2::make_unique<Target::Process>();
 
-  //
-  // Create the process.
-  //
-  auto process = new Target::Process;
+  if (spawner.run([&process]() {
+        return process->ptrace().traceMe(true) == kSuccess;
+      }) != kSuccess) {
+    return nullptr;
+  }
 
-  error = spawner.run(
-      [process]() { return process->ptrace().traceMe(true) == kSuccess; });
-  if (error != kSuccess)
-    goto fail;
-
-  pid = spawner.pid();
+  pid_t pid = spawner.pid();
   DS2LOG(Debug, "created process %d", pid);
 
-  //
-  // Wait the process.
-  //
-  error = process->initialize(pid, 0);
-  if (error != kSuccess)
-    goto fail;
+  if (process->initialize(pid, kFlagNewProcess) != kSuccess) {
+    return nullptr;
+  }
 
-  //
-  // Give a chance to the ptracer to set any specific options.
-  //
-  error = process->ptrace().traceThat(pid);
-  if (error != kSuccess)
-    goto fail;
+  // Give a chance to the ptrace implementation to set any specific options.
+  if (process->ptrace().traceThat(pid) != kSuccess) {
+    return nullptr;
+  }
 
-  return process;
-
-fail:
-  delete process;
-  return nullptr;
+  return process.release();
 }
 
 void Process::resetSignalPass() {
@@ -156,17 +145,6 @@ void Process::resetSignalPass() {
 }
 
 void Process::setSignalPass(int signo, bool set) {
-  //
-  // signal 0, SIGSTOP, SIGCHLD and SIGRTMIN are specially
-  // handled, so we never pass them thru.
-  //
-  if (signo == 0 || signo == SIGSTOP || signo == SIGCHLD
-#if defined(OS_LINUX)
-      || signo == SIGRTMIN
-#endif
-      )
-    return;
-
   if (set) {
     _passthruSignals.insert(signo);
   } else {

@@ -12,8 +12,8 @@
 set -eu
 
 cmake_package="cmake-3.4.0-Linux-x86_64"
-cformat="${CLANG_FORMAT_PATH-clang-format-3.8}"
 top="$(git rev-parse --show-toplevel)"
+cformat="$top/Support/clang-format-3.8"
 
 source "$top/Support/Scripts/common.sh"
 
@@ -71,6 +71,7 @@ check_dirty() {
     for f in "${dirty[@]}"; do
       echo "dirty: $f"
     done
+    git --no-pager diff
     exit 1
   fi
 }
@@ -83,17 +84,22 @@ if [[ "$TARGET" = "Style" ]]; then
 fi
 
 if [[ "$TARGET" = "Registers" ]]; then
-  CLANG_FORMAT="$cformat" CC="gcc-5" CXX="g++-5" "./Support/Scripts/generate-reg-descriptors.sh"
+  CLANG_FORMAT="$cformat" CC="gcc-5" CXX="g++-5" ./Support/Scripts/generate-reg-descriptors.sh
   check_dirty "Generated sources up to date." "Generated sources out of date."
+fi
+
+if [[ "$TARGET" = "Documentation" ]]; then
+  ./Support/Scripts/generate-documentation.sh
+  exit
 fi
 
 # Go back to the build tree where we started.
 cd "$OLDPWD"
 
 # CentOS uses different compiler names than Ubuntu, so we can only use the
-# toolchain files on Ubuntu In addition, clang-3.7 is also not available for
+# toolchain files on Ubuntu In addition, clang-3.8 is also not available for
 # CentOS
-if grep -q "Ubuntu" "/etc/issue"; then
+if [ ! -s "/etc/centos-release" ]; then
   if [[ "${CLANG-}" = "1" ]]; then
     cmake_options=(-DCMAKE_TOOLCHAIN_FILE="../Support/CMake/Toolchain-${TARGET}-Clang.cmake")
   else
@@ -111,9 +117,17 @@ if [[ "${COVERAGE-}" = "1" ]]; then
   cmake_options+=(-DCOVERAGE="1")
 fi
 
+if [[ "${CLANG-}" = "1" ]] && [[ "$TARGET" = "Linux-X86_64" ]]; then
+  cmake_options+=(-DSANITIZER="asan")
+fi
+
 cmake "${cmake_options[@]}" "$top"
 make -j$(num_cpus)
 
 if [[ -n "${LLDB_TESTS-}" ]]; then
   "$top/Support/Scripts/run-lldb-tests.sh"
+fi
+
+if [[ -n "${GDB_TESTS-}" ]]; then
+  "$top/Support/Scripts/run-gdb-tests.sh"
 fi

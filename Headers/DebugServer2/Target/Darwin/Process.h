@@ -18,23 +18,12 @@ namespace ds2 {
 namespace Target {
 namespace Darwin {
 
-class Process : public MachOProcess {
+class Process : public Darwin::MachOProcess {
 protected:
   Host::Darwin::PTrace _ptrace;
-  SoftwareBreakpointManager *_softwareBreakpointManager;
-  HardwareBreakpointManager *_hardwareBreakpointManager;
-  bool _terminated;
 
 protected:
-  friend class POSIX::Process;
-  Process();
-
-public:
-  ~Process() override;
-
-protected:
-  ErrorCode initialize(ProcessId pid, uint32_t flags) override;
-  ErrorCode attach(int waitStatus);
+  ErrorCode attach(int waitStatus) override;
 
 public:
   ErrorCode terminate() override;
@@ -52,6 +41,14 @@ public:
   ErrorCode deallocateMemory(uint64_t address, size_t size) override;
 
 public:
+  ErrorCode readString(Address const &address, std::string &str, size_t length,
+                       size_t *count = nullptr) override;
+  ErrorCode readMemory(Address const &address, void *data, size_t length,
+                       size_t *count = nullptr) override;
+  ErrorCode writeMemory(Address const &address, void const *data, size_t length,
+                        size_t *count = nullptr) override;
+
+public:
   ErrorCode wait() override;
 
 public:
@@ -61,10 +58,6 @@ protected:
   ErrorCode updateInfo() override;
   ErrorCode updateAuxiliaryVector() override;
 
-public:
-  SoftwareBreakpointManager *softwareBreakpointManager() const override;
-  HardwareBreakpointManager *hardwareBreakpointManager() const override;
-
 protected:
   friend class Thread;
   ErrorCode readCPUState(ThreadId tid, Architecture::CPUState &state,
@@ -73,17 +66,10 @@ protected:
                           uint32_t flags = 0);
 
 public:
-  ErrorCode readString(Address const &address, std::string &str, size_t length,
-                       size_t *nread = nullptr) override;
-  ErrorCode readMemory(Address const &address, void *data, size_t length,
-                       size_t *count = nullptr) override;
-  ErrorCode writeMemory(Address const &address, void const *data, size_t length,
-                        size_t *count = nullptr) override;
+  ErrorCode afterResume() override;
 
-public:
-  Architecture::GDBDescriptor const *getGDBRegistersDescriptor() const override;
-  Architecture::LLDBDescriptor const *
-  getLLDBRegistersDescriptor() const override;
+protected:
+  friend class POSIX::Process;
 };
 }
 }

@@ -10,19 +10,22 @@
 //
 
 #include "DebugServer2/Host/Darwin/LibProc.h"
+#include "DebugServer2/Host/Darwin/Mach.h"
+#include "DebugServer2/Target/ThreadBase.h"
 #include "DebugServer2/Utils/Log.h"
 
+#include <cstdlib>
+#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach/task_info.h>
 #include <mach/thread_info.h>
+#include <stdlib.h>
+#include <string>
 #include <sys/param.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/user.h>
-
-#include <cstdlib>
-#include <libproc.h>
-#include <string>
 #include <util.h>
 
 namespace ds2 {
@@ -30,10 +33,8 @@ namespace Host {
 namespace Darwin {
 
 bool LibProc::GetProcessInfo(ProcessId pid, ProcessInfo &info) {
-  int res;
   struct proc_taskallinfo ti;
-
-  res = proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &ti, sizeof(ti));
+  int res = proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &ti, sizeof(ti));
   if (res <= 0)
     return false;
 
@@ -54,8 +55,24 @@ void LibProc::EnumerateProcesses(
   DS2BUG("not implemented");
 }
 
-std::string LibProc::GetThreadName(ProcessId pid, ThreadId tid) {
-  return "<unknown>";
+std::string LibProc::GetThreadName(ProcessThreadId const &ptid) {
+  static const std::string defaultName = "<unknown>";
+  thread_identifier_info_data_t threadId;
+  struct proc_threadinfo ti;
+  Mach mach;
+
+  ErrorCode error = mach.getThreadIdentifierInfo(ptid, &threadId);
+  if (error != kSuccess) {
+    return defaultName;
+  }
+
+  int res = proc_pidinfo(ptid.pid, PROC_PIDTHREADINFO, threadId.thread_handle,
+                         &ti, sizeof(ti));
+  if (res <= 0) {
+    return defaultName;
+  }
+
+  return ti.pth_name;
 }
 
 const char *LibProc::GetExecutablePath(ProcessId pid) { return "unknown"; }

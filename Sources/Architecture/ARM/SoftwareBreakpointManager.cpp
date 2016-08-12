@@ -16,6 +16,7 @@
 #include "DebugServer2/Target/Thread.h"
 #include "DebugServer2/Utils/Log.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 #define super ds2::BreakpointManager
@@ -24,7 +25,8 @@ namespace ds2 {
 namespace Architecture {
 namespace ARM {
 
-SoftwareBreakpointManager::SoftwareBreakpointManager(Target::Process *process)
+SoftwareBreakpointManager::SoftwareBreakpointManager(
+    Target::ProcessBase *process)
     : super(process) {}
 
 SoftwareBreakpointManager::~SoftwareBreakpointManager() { clear(); }
@@ -36,8 +38,6 @@ void SoftwareBreakpointManager::clear() {
 
 ErrorCode SoftwareBreakpointManager::add(Address const &address, Type type,
                                          size_t size, Mode mode) {
-  DS2ASSERT(mode == kModeExec);
-
   if (size < 2 || size > 4) {
     bool isThumb = false;
 
@@ -49,9 +49,7 @@ ErrorCode SoftwareBreakpointManager::add(Address const &address, Type type,
       isThumb = true;
     } else {
       ds2::Architecture::CPUState state;
-      ErrorCode error = _process->currentThread()->readCPUState(state);
-      if (error != kSuccess)
-        return error;
+      CHK(_process->currentThread()->readCPUState(state));
       isThumb = state.isThumb();
     }
 
@@ -63,11 +61,7 @@ ErrorCode SoftwareBreakpointManager::add(Address const &address, Type type,
       // is equivalent to the one used by GDB.
       //
       uint32_t insn;
-      ErrorCode error =
-          _process->readMemory(address.value() & ~1ULL, &insn, sizeof(insn));
-      if (error != kSuccess) {
-        return error;
-      }
+      CHK(_process->readMemory(address.value() & ~1ULL, &insn, sizeof(insn)));
       auto inst_size = GetThumbInstSize(insn);
       size = inst_size == ThumbInstSize::TwoByteInst ? 2 : 3;
     } else {
@@ -104,71 +98,83 @@ void SoftwareBreakpointManager::enumerate(
   });
 }
 
-bool SoftwareBreakpointManager::hit(Target::Thread *thread) {
+int SoftwareBreakpointManager::hit(Target::Thread *thread, Site &site) {
   ds2::Architecture::CPUState state;
   thread->readCPUState(state);
-  return super::hit(state.pc());
+#if defined(OS_WIN32)
+  state.setPC(state.pc() - 2);
+  if (super::hit(state.pc(), site)) {
+    //
+    // Move the PC back to the instruction
+    //
+    if (thread->writeCPUState(state) != kSuccess) {
+      abort();
+    }
+    return 0;
+  }
+  return -1;
+#else
+  return super::hit(state.pc(), site) ? 0 : -1;
+#endif
 }
 
 void SoftwareBreakpointManager::getOpcode(uint32_t type,
                                           std::string &opcode) const {
+#if defined(OS_WIN32) && defined(ARCH_ARM)
+  if (type == 4) {
+    static const uint32_t WinARMBPType = 2;
+    DS2LOG(Warning, "requesting a breakpoint of size %u on Windows ARM, "
+                    "adjusting to type %u",
+           type, WinARMBPType);
+    type = WinARMBPType;
+  }
+#endif
+
+  // TODO: We shouldn't have preprocessor checks for ARCH_ARM vs ARCH_ARM64
+  // because we might be an ARM64 binary debugging an ARM inferior.
   switch (type) {
 #if defined(ARCH_ARM)
   case 2: // udf #1
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     opcode += '\xde';
+#if defined(OS_POSIX)
     opcode += '\x01';
-#else
-    opcode += '\x01';
-    opcode += '\xde';
+#elif defined(OS_WIN32)
+    opcode += '\xfe';
 #endif
     break;
   case 3: // udf.w #0
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     opcode += '\xa0';
     opcode += '\x00';
     opcode += '\xf7';
     opcode += '\xf0';
-#else
-    opcode += '\xf0';
-    opcode += '\xf7';
-    opcode += '\x00';
-    opcode += '\xa0';
-#endif
     break;
   case 4: // udf #16
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     opcode += '\xe7';
     opcode += '\xf0';
     opcode += '\x01';
     opcode += '\xf0';
-#else
-    opcode += '\xf0';
-    opcode += '\x01';
-    opcode += '\xf0';
-    opcode += '\xe7';
-#endif
     break;
 #elif defined(ARCH_ARM64)
   case 4:
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     opcode += '\xd4';
     opcode += '\x20';
     opcode += '\x20';
     opcode += '\x00';
-#else
-    opcode += '\x00';
-    opcode += '\x20';
-    opcode += '\x20';
-    opcode += '\xd4';
-#endif
     break;
 #endif
   default:
     DS2LOG(Error, "invalid breakpoint type %d", type);
-    DS2ASSERT(0 && "invalid breakpoint type");
+    DS2BUG("invalid breakpoint type");
     break;
   }
+
+#if !(defined(ENDIAN_BIG) || defined(ENDIAN_LITTLE))
+#error "Target not supported."
+#endif
+
+#if defined(ENDIAN_LITTLE)
+  std::reverse(opcode.begin(), opcode.end());
+#endif
 }
 
 ErrorCode SoftwareBreakpointManager::enableLocation(Site const &site) {
@@ -180,14 +186,14 @@ ErrorCode SoftwareBreakpointManager::enableLocation(Site const &site) {
   old.resize(opcode.size());
   error = _process->readMemory(site.address, &old[0], old.size());
   if (error != kSuccess) {
-    DS2LOG(Error, "cannot enable breakpoint at %#lx",
+    DS2LOG(Error, "cannot enable breakpoint at %#lx, readMemory failed",
            (unsigned long)site.address.value());
     return error;
   }
 
   error = _process->writeMemory(site.address, &opcode[0], opcode.size());
   if (error != kSuccess) {
-    DS2LOG(Error, "cannot enable breakpoint at %#lx",
+    DS2LOG(Error, "cannot enable breakpoint at %#lx, writeMemory failed",
            (unsigned long)site.address.value());
     return error;
   }
@@ -223,6 +229,14 @@ ErrorCode SoftwareBreakpointManager::disableLocation(Site const &site) {
   _insns.erase(site.address);
 
   return kSuccess;
+}
+
+ErrorCode SoftwareBreakpointManager::isValid(Address const &address,
+                                             size_t size, Mode mode) const {
+  DS2ASSERT(mode == kModeExec);
+  DS2ASSERT((size >= 2) && (size <= 4));
+
+  return super::isValid(address, size, mode);
 }
 }
 }

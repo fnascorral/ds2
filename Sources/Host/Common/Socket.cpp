@@ -20,7 +20,7 @@
 #include <ws2tcpip.h>
 #define SOCK_ERRNO WSAGetLastError()
 #define SOCK_WOULDBLOCK WSAEWOULDBLOCK
-#elif defined(OS_LINUX) || defined(OS_FREEBSD) || defined(OS_DARWIN)
+#elif defined(OS_POSIX)
 #include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
@@ -55,6 +55,9 @@ bool Socket::create(int af) {
     _lastError = SOCK_ERRNO;
     return false;
   }
+#if defined(OS_POSIX)
+  fcntl(F_SETFD, _handle, FD_CLOEXEC);
+#endif
 
   // On most Linux systems, IPV6_V6ONLY is off by default, but on some systems
   // it's on, so turn it off to be able to receive both IPv6 and IPv4
@@ -147,7 +150,7 @@ bool Socket::listen(std::string const &address, std::string const &port) {
   return true;
 }
 
-Socket *Socket::accept() {
+std::unique_ptr<Socket> Socket::accept() {
   if (!listening())
     return nullptr;
 
@@ -167,7 +170,7 @@ Socket *Socket::accept() {
   ::fcntl(handle, F_SETFD, flags);
 #endif
 
-  auto client = new Socket(handle);
+  auto client = make_protected_unique(handle);
   client->setNonBlocking();
   return client;
 }

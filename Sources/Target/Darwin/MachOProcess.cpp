@@ -13,17 +13,16 @@
 
 #include <dirent.h>
 #include <limits>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <mach/thread_info.h>
+#include <sys/types.h>
 
 namespace ds2 {
 namespace Target {
 namespace Darwin {
 
-//
-// This is a not SVR4 ELF process, we want this method because GDB
-// distinguishes between SVR4 and non-SVR4 processes to read
-// libraries information.
-//
-bool MachOProcess::isELFProcess() const { return false; }
+Host::Darwin::Mach &MachOProcess::mach() { return _mach; }
 
 ErrorCode MachOProcess::getAuxiliaryVector(std::string &auxv) {
   ErrorCode error = updateAuxiliaryVector();
@@ -36,7 +35,6 @@ ErrorCode MachOProcess::getAuxiliaryVector(std::string &auxv) {
 
 uint64_t MachOProcess::getAuxiliaryVectorValue(uint64_t type) {
   DS2BUG("not implemented");
-  return type;
 }
 
 //
@@ -50,8 +48,6 @@ ErrorCode MachOProcess::updateInfo() {
   if (_info.pid == _pid)
     return kErrorAlreadyExist;
 
-  ErrorCode error;
-
   // This is tricky, we don't know the load base, and to
   // do so we need to update the auxiliary vector, but
   // in order to interpret it we need to determine first
@@ -59,9 +55,10 @@ ErrorCode MachOProcess::updateInfo() {
   // we don't have idea of what is our target platform,
   // so we'll do an empirical test.
   if (!_loadBase.valid() || !_entryPoint.valid()) {
-    error = updateAuxiliaryVector();
-    if (error != kSuccess && error != kErrorAlreadyExist)
+    ErrorCode error = updateAuxiliaryVector();
+    if (error != kSuccess && error != kErrorAlreadyExist) {
       return error;
+    }
 
     // Hack to use enumerateAuxiliaryVector before information is set.
     _info.pid = _pid;
@@ -84,6 +81,9 @@ ErrorCode MachOProcess::updateInfo() {
 
   _entryPoint = 0; // TODO
   _loadBase = 0;   // TODO
+
+  _info.osType = "macosx";
+  _info.osVendor = "apple";
 
   _info.cpuType = kCPUTypeX86_64;           // TODO
   _info.cpuSubType = kCPUSubTypeX86_64_ALL; // TODO
@@ -114,8 +114,7 @@ ErrorCode MachOProcess::updateAuxiliaryVector() { return kSuccess; }
 // Retrieves the shared library info address pointer.
 //
 ErrorCode MachOProcess::getSharedLibraryInfoAddress(Address &address) {
-  DS2BUG("not implemented");
-  return kSuccess;
+  return mach().getProcessDylbInfo(_info.pid, address);
 }
 
 //
@@ -124,13 +123,8 @@ ErrorCode MachOProcess::getSharedLibraryInfoAddress(Address &address) {
 ErrorCode MachOProcess::enumerateSharedLibraries(
     std::function<void(SharedLibraryInfo const &)> const &cb) {
   Address address;
-
+  CHK(getSharedLibraryInfoAddress(address));
   DS2BUG("not implemented");
-  ErrorCode error = getSharedLibraryInfoAddress(address);
-  if (error != kSuccess)
-    return error;
-
-  return kSuccess;
 }
 }
 }

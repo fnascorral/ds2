@@ -14,6 +14,7 @@
 #include "DebugServer2/Base.h"
 #include "DebugServer2/CPUTypes.h"
 #include "DebugServer2/Constants.h"
+#include "DebugServer2/ErrorCodes.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -49,7 +50,7 @@ static const ProcessId kAnyProcessId = static_cast<ProcessId>(0);
 static const ThreadId kAllThreadId = static_cast<ThreadId>(-1);
 static const ThreadId kAnyThreadId = static_cast<ThreadId>(0);
 
-typedef std::vector<uint8_t> U8Vector;
+typedef std::vector<uint8_t> ByteVector;
 
 //
 // Process/Thread Id Tuple
@@ -104,9 +105,11 @@ struct StopInfo {
     kReasonReadWatchpoint,
     kReasonAccessWatchpoint,
     kReasonBreakpoint,
+    kReasonTrace,
     kReasonSignalStop, // TODO better name
     kReasonTrap,
-    kReasonThreadCreate,
+    kReasonThreadSpawn,
+    kReasonThreadEntry,
     kReasonThreadExit,
 #if defined(OS_WIN32)
     kReasonMemoryError,
@@ -114,6 +117,7 @@ struct StopInfo {
     kReasonMathError,
     kReasonInstructionError,
     kReasonLibraryEvent,
+    kReasonDebugOutput,
 #endif
   };
 
@@ -122,6 +126,10 @@ struct StopInfo {
   // TODO: status and signal should be an union.
   int status;
   int signal;
+#if defined(OS_WIN32)
+  std::string debugString;
+#endif
+
   int core;
 
   StopInfo() { clear(); }
@@ -131,6 +139,9 @@ struct StopInfo {
     reason = kReasonNone;
     status = 0;
     signal = 0;
+#if defined(OS_WIN32)
+    debugString.clear();
+#endif
     core = -1;
   }
 };
@@ -320,6 +331,12 @@ struct SharedLibraryInfo {
     uint64_t ldAddress;
   } svr4;
   std::vector<uint64_t> sections;
+};
+
+struct MappedFileInfo {
+  std::string path;
+  uint64_t baseAddress;
+  uint64_t size;
 };
 }
 

@@ -14,38 +14,6 @@
 namespace ds2 {
 
 //
-// Error Codes as defined by GDB remoting documentation,
-// plus some others.
-//
-
-enum ErrorCode {
-  kSuccess,
-  kErrorNoPermission = 1,
-  kErrorNotFound = 2,
-  kErrorProcessNotFound = 3,
-  kErrorInterrupted = 4,
-  kErrorInvalidHandle = 9,
-  kErrorNoMemory = 12,
-  kErrorAccessDenied = 13,
-  kErrorInvalidAddress = 14,
-  kErrorBusy = 16,
-  kErrorAlreadyExist = 17,
-  kErrorNoDevice = 19,
-  kErrorNotDirectory = 20,
-  kErrorIsDirectory = 21,
-  kErrorInvalidArgument = 22,
-  kErrorTooManySystemFiles = 23,
-  kErrorTooManyFiles = 24,
-  kErrorFileTooBig = 27,
-  kErrorNoSpace = 28,
-  kErrorInvalidSeek = 29,
-  kErrorNotWriteable = 30,
-  kErrorNameTooLong = 91,
-  kErrorUnknown = 9999,
-  kErrorUnsupported = 10000
-};
-
-//
 // Endian
 //
 
@@ -76,7 +44,22 @@ enum /*Protection*/ {
   kProtectionRead = (1 << 2)
 };
 
-char const *GetErrorCodeString(ErrorCode err);
+//
+// Open flags
+//
+
+enum OpenFlags {
+  kOpenFlagInvalid = 0,
+  kOpenFlagRead = (1 << 0),
+  kOpenFlagWrite = (1 << 1),
+  kOpenFlagAppend = (1 << 2),
+  kOpenFlagTruncate = (1 << 3),
+  kOpenFlagNonBlocking = (1 << 4),
+  kOpenFlagCreate = (1 << 5),
+  kOpenFlagNewOnly = (1 << 6),
+  kOpenFlagNoFollow = (1 << 7),
+  kOpenFlagCloseOnExec = (1 << 8)
+};
 }
 
 #endif // !__DebugServer2_Constants_h

@@ -10,6 +10,7 @@
 ##
 
 import os
+import sys
 from subprocess import check_call
 
 repositories = []
@@ -17,15 +18,11 @@ keys = []
 
 target = os.getenv('TARGET')
 
-if target in [ 'Style', 'Registers' ]:
-    repositories.append('ppa:ubuntu-toolchain-r/test')
-    keys.append('http://llvm.org/apt/llvm-snapshot.gpg.key')
-    repositories.append('deb http://llvm.org/apt/trusty/ llvm-toolchain-trusty-3.8 main')
-elif os.getenv('CLANG') == '1' or os.getenv('LLDB_TESTS') != None:
-    repositories.append('ppa:ubuntu-toolchain-r/test')
-    keys.append('http://llvm.org/apt/llvm-snapshot.gpg.key')
-    repositories.append('deb http://llvm.org/apt/trusty/ llvm-toolchain-trusty-3.7 main')
-elif target in [ 'Linux-X86', 'Linux-X86_64' ]:
+if 'Darwin' in target:
+   check_call('brew update', shell=True)
+   sys.exit(0)
+
+if target in [ 'Style', 'Registers', 'Linux-X86', 'Linux-X86_64', 'Tizen-X86' ]:
     repositories.append('ppa:ubuntu-toolchain-r/test')
 
 for r in repositories:

@@ -13,13 +13,12 @@
 
 #include "DebugServer2/GDBRemote/SessionDelegate.h"
 
+#include <unordered_map>
+
 namespace ds2 {
 namespace GDBRemote {
 
 class DummySessionDelegateImpl : public SessionDelegate {
-protected:
-  bool _secure;
-
 protected:
   DummySessionDelegateImpl();
 
@@ -34,9 +33,10 @@ protected: // Common
   ErrorCode onSetMaxPacketSize(Session &session, size_t size) override;
   ErrorCode onSetMaxPayloadSize(Session &session, size_t size) override;
 
-  void onSetLogging(Session &session, std::string const &mode,
-                    std::string const &filename,
-                    StringCollection const &flags) override;
+  ErrorCode onSetLogging(Session &session, std::string const &mode,
+                         std::string const &filename,
+                         StringCollection const &flags) override;
+  ErrorCode onSendInput(Session &session, ByteVector const &buf) override;
 
   ErrorCode
   onAllowOperations(Session &session,
@@ -51,6 +51,9 @@ protected: // Common
   ErrorCode onQueryServerVersion(Session &session,
                                  ServerVersion &version) const override;
   ErrorCode onQueryHostInfo(Session &session, HostInfo &info) const override;
+  ErrorCode onQueryFileLoadAddress(Session &session,
+                                   std::string const &file_path,
+                                   Address &address) override;
 
 protected: // Debugging Session
   ErrorCode onEnableControlAgent(Session &session, bool enable) override;
@@ -98,7 +101,7 @@ protected: // Debugging Session
   ErrorCode onInterrupt(Session &session) override;
   ErrorCode onTerminate(Session &session, ProcessThreadId const &ptid,
                         StopInfo &stop) override;
-  ErrorCode onTerminate(Session &session, ProcessId pid) override;
+  ErrorCode onExitServer(Session &session) override;
 
   ErrorCode onSynchronizeThreadState(Session &session, ProcessId pid) override;
 
@@ -156,9 +159,9 @@ protected: // Debugging Session
                                  std::string const &value) override;
 
   ErrorCode onReadMemory(Session &session, Address const &address,
-                         size_t length, std::string &data) override;
+                         size_t length, ByteVector &data) override;
   ErrorCode onWriteMemory(Session &session, Address const &address,
-                          std::string const &data, size_t &nwritten) override;
+                          ByteVector const &data, size_t &nwritten) override;
 
   ErrorCode onAllocateMemory(Session &session, size_t size,
                              uint32_t permissions, Address &address) override;
@@ -222,36 +225,18 @@ protected: // Platform Session
                                   uint32_t mode) override;
 
   ErrorCode onFileOpen(Session &session, std::string const &path,
-                       uint32_t flags, uint32_t mode, int &fd) override;
+                       OpenFlags flags, uint32_t mode, int &fd) override;
   ErrorCode onFileClose(Session &session, int fd) override;
-  ErrorCode onFileRead(Session &session, int fd, size_t count, uint64_t offset,
-                       std::string &buffer) override;
+  ErrorCode onFileRead(Session &session, int fd, uint64_t &count,
+                       uint64_t offset, ByteVector &buffer) override;
   ErrorCode onFileWrite(Session &session, int fd, uint64_t offset,
-                        std::string const &buffer, size_t &nwritten) override;
+                        ByteVector const &buffer, uint64_t &nwritten) override;
 
   ErrorCode onFileRemove(Session &session, std::string const &path) override;
   ErrorCode onFileReadLink(Session &session, std::string const &path,
                            std::string &resolved) override;
-
-#if 0
-    //
-    // more F packets:
-    // https://sourceware.org/gdb/onlinedocs/gdb/List-of-Supported-Calls.html#List-of-Supported-Calls
-    //
-    virtual ErrorCode onGetCurrentTime(Session &session, TimeValue &tv);
-
-    virtual ErrorCode onFileIsATTY(Session &session, int fd);
-    virtual ErrorCode onFileRename(Session &session,
-            std::string const &oldPath, std::string const &newPath);
-
-    virtual ErrorCode onFileGetStat(Session &session, std::string const &path,
-            FileStat &stat);
-    virtual ErrorCode onFileGetStat(Session &session, int fd,
-            FileStat &stat);
-
-    virtual ErrorCode onFileSeek(Session &session, int fd,
-            int64_t offset, int whence, int64_t &newOffset);
-#endif
+  ErrorCode onFileSetPermissions(Session &session, std::string const &path,
+                                 uint32_t mode) override;
 
   ErrorCode onFileExists(Session &session, std::string const &path) override;
   ErrorCode onFileComputeMD5(Session &session, std::string const &path,
@@ -278,11 +263,11 @@ protected: // Platform Session
                                     std::string &workingDir) const override;
 
 protected: // System Session
-  void onReset(Session &session) override;
+  ErrorCode onReset(Session &session) override;
   ErrorCode onFlashErase(Session &session, Address const &address,
                          size_t length) override;
   ErrorCode onFlashWrite(Session &session, Address const &address,
-                         std::string const &data) override;
+                         ByteVector const &data) override;
   ErrorCode onFlashDone(Session &session) override;
 };
 }

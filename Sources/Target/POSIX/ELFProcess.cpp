@@ -24,6 +24,8 @@ typedef Elf64_Auxinfo Elf64_auxv_t;
 
 using ds2::Support::ELFSupport;
 
+#define super ds2::Target::POSIX::Process
+
 namespace ds2 {
 namespace Target {
 namespace POSIX {
@@ -186,9 +188,8 @@ EnumerateLinkMap(ELFProcess *process, Address addressToDPtr,
   if (error != ds2::kSuccess)
     return error;
 
-// Use __ANDROID__ and not PLATFORM_ANDROID. The Android toolchain doesn't
-// have a definition for LAV_CURRENT, so we skip this check.
-#if !defined(__ANDROID__) && !defined(OS_FREEBSD)
+// Android doesn't have a definition for LAV_CURRENT, so we skip this check.
+#if !defined(PLATFORM_ANDROID) && !defined(OS_FREEBSD)
   if (debug.version != LAV_CURRENT)
     return ds2::kErrorUnsupported;
 #endif
@@ -214,13 +215,8 @@ EnumerateLinkMap(ELFProcess *process, Address addressToDPtr,
     // On non-android linux systems, main executable has an empty path.
     shlib.main = shlib.path.empty();
 #elif defined(OS_LINUX) && defined(PLATFORM_ANDROID)
-    // On android, libraries have just their basename as path, except for
-    // /system/bin/linker and /system/bin/linker64 that have the full path.
-    // The main executable also has a full path, except when debugging an app,
-    // where the app's bundle indentifier is used as path. (wat?)
-    shlib.main = shlib.svr4.ldAddress == 0 ||
-                 (shlib.path.find("/system/bin/linker") != 0 &&
-                  !shlib.path.empty() && shlib.path[0] == '/');
+    // On android, the main executable has a load address of 0.
+    shlib.main = shlib.svr4.ldAddress == 0;
 #elif defined(OS_FREEBSD)
     // FIXME(sas): not sure how exactly to determine this on FreeBSD.
     shlib.main = false;
@@ -236,13 +232,6 @@ EnumerateLinkMap(ELFProcess *process, Address addressToDPtr,
   return ds2::kSuccess;
 }
 }
-
-//
-// This is a SVR4 ELF process, we want this method because GDB
-// distinguishes between SVR4 and non-SVR4 processes to read
-// libraries information.
-//
-bool ELFProcess::isELFProcess() const { return true; }
 
 ErrorCode ELFProcess::getAuxiliaryVector(std::string &auxv) {
   ErrorCode error = updateAuxiliaryVector();

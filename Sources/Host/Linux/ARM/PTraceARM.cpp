@@ -12,66 +12,21 @@
 #include "DebugServer2/HardwareBreakpointManager.h"
 #include "DebugServer2/Host/Linux/ExtraWrappers.h"
 #include "DebugServer2/Host/Platform.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Utils/Log.h"
-
-#define super ds2::Host::POSIX::PTrace
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <asm/ptrace.h>
 #include <elf.h>
 #include <sys/ptrace.h>
 #include <sys/uio.h>
 
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
+
+#define super ds2::Host::POSIX::PTrace
 
 namespace ds2 {
 namespace Host {
 namespace Linux {
-
-struct PTracePrivateData {
-  uint8_t breakpointCount;
-  uint8_t watchpointCount;
-  uint8_t maxWatchpointSize;
-
-  PTracePrivateData()
-      : breakpointCount(0), watchpointCount(0), maxWatchpointSize(0) {}
-};
-
-void PTrace::initCPUState(ProcessId pid) {
-  if (_privateData != nullptr)
-    return;
-
-  _privateData = new PTracePrivateData;
-
-  //
-  // Retrieve the information about Hardware Breakpoint, if supported.
-  //
-  unsigned int value = 0;
-  if (wrapPtrace(PTRACE_GETHBPREGS, pid, 0, &value) < 0) {
-    DS2LOG(Debug, "hardware breakpoint support disabled, error=%s",
-           Stringify::Errno(errno));
-    return;
-  }
-
-  if ((value >> 24) == 0)
-    return;
-
-  _privateData->breakpointCount = value & 0xff;
-  _privateData->watchpointCount = (value >> 8) & 0xff;
-  _privateData->maxWatchpointSize = (value >> 16) & 0xff;
-
-  //
-  // Set our hard limits.
-  //
-  if (_privateData->breakpointCount > 32) {
-    _privateData->breakpointCount = 32;
-  }
-  if (_privateData->watchpointCount > 32) {
-    _privateData->watchpointCount = 32;
-  }
-}
-
-void PTrace::doneCPUState() { delete _privateData; }
 
 ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid, ProcessInfo const &,
                                Architecture::CPUState &state) {
@@ -80,11 +35,6 @@ ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid, ProcessInfo const &,
   ErrorCode error = ptidToPid(ptid, pid);
   if (error != kSuccess)
     return error;
-
-  //
-  // Initialize the CPU state, just in case.
-  //
-  initCPUState(pid);
 
   //
   // Read GPRs
@@ -104,36 +54,6 @@ ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid, ProcessInfo const &,
   if (wrapPtrace(PTRACE_GETVFPREGS, pid, nullptr, &state.vfp) < 0)
     return Platform::TranslateError();
 
-  //
-  // Read hardware breakpoints and watchpoints.
-  //
-  for (size_t n = 0; n < _privateData->breakpointCount; n++) {
-    unsigned long value;
-
-    if (wrapPtrace(PTRACE_GETHBPREGS, pid, (n << 1) + 1, &value) < 0) {
-      state.hbp.bp_addr[n] = 0;
-    } else {
-      state.hbp.bp_addr[n] = value;
-    }
-
-    if (wrapPtrace(PTRACE_GETHBPREGS, pid, (n << 1) + 2, &value) < 0) {
-      state.hbp.bp_ctrl[n] = 0;
-    } else {
-      state.hbp.bp_ctrl[n] = value;
-    }
-  }
-
-  for (size_t n = 0; n < _privateData->watchpointCount; n++) {
-    if (wrapPtrace(PTRACE_GETHBPREGS, pid, -((n << 1) + 1),
-                   &state.hbp.wp_addr[n]) < 0) {
-      state.hbp.wp_addr[n] = 0;
-    }
-    if (wrapPtrace(PTRACE_GETHBPREGS, pid, -((n << 1) + 2),
-                   &state.hbp.wp_ctrl[n]) < 0) {
-      state.hbp.wp_ctrl[n] = 0;
-    }
-  }
-
   return kSuccess;
 }
 
@@ -141,7 +61,6 @@ uint32_t PTrace::getStoppointData(ProcessThreadId const &ptid) {
   pid_t pid;
 
   ErrorCode error = ptidToPid(ptid, pid);
-
   if (error != kSuccess)
     return 0;
 
@@ -184,11 +103,6 @@ ErrorCode PTrace::writeCPUState(ProcessThreadId const &ptid,
     return error;
 
   //
-  // Initialize the CPU state, just in case.
-  //
-  initCPUState(pid);
-
-  //
   // Read GPRs
   //
   struct pt_regs gprs;
@@ -208,18 +122,51 @@ ErrorCode PTrace::writeCPUState(ProcessThreadId const &ptid,
   if (wrapPtrace(PTRACE_SETVFPREGS, pid, nullptr, &state.vfp) < 0)
     return Platform::TranslateError();
 
-  //
-  // Write hardware breakpoints and watchpoints.
-  //
-  for (size_t n = 0; n < _privateData->breakpointCount; n++) {
-    wrapPtrace(PTRACE_SETHBPREGS, pid, (n << 1) + 1, &state.hbp.bp_addr[n]);
-    wrapPtrace(PTRACE_GETHBPREGS, pid, (n << 1) + 2, &state.hbp.bp_ctrl[n]);
-  }
+  return kSuccess;
+}
 
-  for (size_t n = 0; n < _privateData->watchpointCount; n++) {
-    wrapPtrace(PTRACE_SETHBPREGS, pid, -((n << 1) + 1), &state.hbp.wp_addr[n]);
-    wrapPtrace(PTRACE_SETHBPREGS, pid, -((n << 1) + 2), &state.hbp.wp_ctrl[n]);
-  }
+ErrorCode PTrace::writeStoppoint(ProcessThreadId const &ptid, size_t idx,
+                                 uint32_t *val) {
+  pid_t pid;
+
+  ErrorCode error = ptidToPid(ptid, pid);
+  if (error != kSuccess)
+    return error;
+
+  if (wrapPtrace(PTRACE_SETHBPREGS, pid, idx, val) < 0)
+    return Platform::TranslateError();
+
+  return kSuccess;
+}
+
+ErrorCode PTrace::writeHardwareBreakpoint(ProcessThreadId const &ptid,
+                                          uint32_t addr, uint32_t ctrl,
+                                          size_t idx) {
+  ErrorCode error;
+
+  error = writeStoppoint(ptid, (idx << 1) + 1, &addr);
+  if (error != kSuccess)
+    return error;
+
+  error = writeStoppoint(ptid, (idx << 1) + 2, &ctrl);
+  if (error != kSuccess)
+    return error;
+
+  return kSuccess;
+}
+
+ErrorCode PTrace::writeHardwareWatchpoint(ProcessThreadId const &ptid,
+                                          uint32_t addr, uint32_t ctrl,
+                                          size_t idx) {
+  ErrorCode error;
+
+  error = writeStoppoint(ptid, -((idx << 1) + 1), &addr);
+  if (error != kSuccess)
+    return error;
+
+  error = writeStoppoint(ptid, -((idx << 1) + 2), &ctrl);
+  if (error != kSuccess)
+    return error;
 
   return kSuccess;
 }

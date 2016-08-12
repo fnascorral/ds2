@@ -30,6 +30,7 @@
 #include <string>
 #if !defined(OS_WIN32)
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #endif
 
@@ -51,9 +52,9 @@ static bool gGDBCompat = false;
 // This function creates and initializes a socket than can be either a client
 // (if reverse is true), or a server (if reverse is false) that will then need
 // to be accept()'d on.
-Socket *CreateSocket(std::string const &host, std::string const &port,
-                     bool reverse) {
-  auto socket = new Socket;
+static std::unique_ptr<Socket>
+CreateSocket(std::string const &host, std::string const &port, bool reverse) {
+  auto socket = ds2::make_unique<Socket>();
 
   if (reverse) {
     if (!socket->connect(host, port)) {
@@ -68,6 +69,11 @@ Socket *CreateSocket(std::string const &host, std::string const &port,
       DS2LOG(Fatal, "cannot listen on [%s:%s]: %s", host.c_str(), port.c_str(),
              socket->error().c_str());
     } else {
+      // This print to stderr is required when gdb launches ds2
+      if (gGDBCompat) {
+        fprintf(stderr, "Listening on port %s\n", socket->port().c_str());
+      }
+
       DS2LOG(Info, "listening on [%s:%s]", socket->address().c_str(),
              socket->port().c_str());
     }
@@ -78,19 +84,35 @@ Socket *CreateSocket(std::string const &host, std::string const &port,
 
 #if !defined(OS_WIN32)
 static int PlatformMain(std::string const &host, std::string const &port) {
-  auto server = std::unique_ptr<Socket>(CreateSocket(host, port, false));
+  struct PlatformClient {
+    std::unique_ptr<Socket> socket;
+    PlatformSessionImpl impl;
+    Session session;
 
-  PlatformSessionImpl impl;
+    PlatformClient(std::unique_ptr<Socket> socket_)
+        : socket(std::move(socket_)),
+          session(ds2::GDBRemote::kCompatibilityModeLLDB) {
+      session.setDelegate(&impl);
+      session.create(socket.get());
+    }
+  };
+
+  std::unique_ptr<Socket> serverSocket = CreateSocket(host, port, false);
 
   do {
-    // Platform mode implies that we are talking to an LLDB remote.
-    Session session(ds2::GDBRemote::kCompatibilityModeLLDB);
-    session.setDelegate(&impl);
-    auto client = std::unique_ptr<Socket>(server->accept());
-    session.create(client.get());
+    std::unique_ptr<Socket> clientSocket = serverSocket->accept();
+    auto platformClient =
+        ds2::make_unique<PlatformClient>(std::move(clientSocket));
 
-    while (session.receive(/*cooked=*/false))
-      continue;
+    std::thread thread(
+        [](std::unique_ptr<PlatformClient> client) {
+          while (client->session.receive(/*cooked=*/false)) {
+            continue;
+          }
+        },
+        std::move(platformClient));
+
+    thread.detach();
   } while (gKeepAlive);
 
   return EXIT_SUCCESS;
@@ -100,11 +122,11 @@ static int PlatformMain(std::string const &host, std::string const &port) {
 static int RunDebugServer(Socket *socket, SessionDelegate *impl) {
   Session session(gGDBCompat ? ds2::GDBRemote::kCompatibilityModeGDB
                              : ds2::GDBRemote::kCompatibilityModeLLDB);
-  auto qchannel = new QueueChannel(socket);
-  SessionThread thread(qchannel, &session);
+  QueueChannel qchannel(socket);
+  SessionThread thread(&qchannel, &session);
 
   session.setDelegate(impl);
-  session.create(qchannel);
+  session.create(&qchannel);
 
   DS2LOG(Debug, "DEBUG SERVER STARTED");
   thread.start();
@@ -119,9 +141,7 @@ static int DebugMain(ds2::StringCollection const &args,
                      ds2::EnvironmentBlock const &env, int attachPid,
                      std::string const &host, std::string const &port,
                      bool reverse, std::string const &namedPipePath) {
-  // Use a shared_ptr here so we can easily copy it before calling
-  // RunDebugServer below, if this is a reverse connect case.
-  auto socket = std::shared_ptr<Socket>(CreateSocket(host, port, reverse));
+  std::unique_ptr<Socket> socket = CreateSocket(host, port, reverse);
 
   if (!namedPipePath.empty()) {
     std::string realPort = socket->port();
@@ -137,19 +157,17 @@ static int DebugMain(ds2::StringCollection const &args,
   }
 
   do {
-    DebugSessionImpl *impl;
+    std::unique_ptr<DebugSessionImpl> impl;
 
     if (attachPid > 0)
-      impl = new DebugSessionImpl(attachPid);
+      impl = ds2::make_unique<DebugSessionImpl>(attachPid);
     else if (args.size() > 0)
-      impl = new DebugSessionImpl(args, env);
+      impl = ds2::make_unique<DebugSessionImpl>(args, env);
     else
-      impl = new DebugSessionImpl();
+      impl = ds2::make_unique<DebugSessionImpl>();
 
-    auto client = reverse ? socket : std::shared_ptr<Socket>(socket->accept());
-    return RunDebugServer(client.get(), impl);
-
-    delete impl;
+    return RunDebugServer(reverse ? socket.get() : socket->accept().get(),
+                          impl.get());
   } while (gKeepAlive);
 
   return EXIT_SUCCESS;
@@ -157,7 +175,7 @@ static int DebugMain(ds2::StringCollection const &args,
 
 #if !defined(OS_WIN32)
 static int SlaveMain() {
-  auto server = std::unique_ptr<Socket>(CreateSocket("localhost", "0", false));
+  std::unique_ptr<Socket> server = CreateSocket("127.0.0.1", "0", false);
   std::string port = server->port();
 
   pid_t pid = ::fork();
@@ -166,29 +184,20 @@ static int SlaveMain() {
   }
 
   if (pid == 0) {
-    //
-    // Let the slave have its own session
-    // TODO maybe should be a command line switch?
-    //
-    setsid();
-
-    //
-    // When in slave mode, output is suppressed but
-    // for standard error.
-    //
+    // When in slave mode, output is suppressed but for standard error.
     close(0);
     close(1);
 
     open("/dev/null", O_RDONLY);
     open("/dev/null", O_WRONLY);
 
-    auto client = std::unique_ptr<Socket>(server->accept());
-    return RunDebugServer(client.get(), new SlaveSessionImpl);
+    std::unique_ptr<Socket> client = server->accept();
+
+    SlaveSessionImpl impl;
+    return RunDebugServer(client.get(), &impl);
   } else {
-    //
-    // Write to the standard output to let know our parent
+    // Write to the standard output to let our parent know
     // where we're listening.
-    //
     fprintf(stdout, "%s %d\n", port.c_str(), pid);
   }
 
@@ -196,7 +205,7 @@ static int SlaveMain() {
 }
 #endif
 
-DS2_ATTRIBUTE_NORETURN static void ListProcesses() {
+[[noreturn]] static void ListProcesses() {
   printf("Processes running on %s:\n\n", Platform::GetHostName());
   printf("%s\n%s\n", "PID    USER       ARCH    NAME",
          "====== ========== ======= ============================");
@@ -210,7 +219,7 @@ DS2_ATTRIBUTE_NORETURN static void ListProcesses() {
 #if !defined(OS_WIN32)
           user = ds2::Utils::ToString(info.realUid);
 #else
-          user = "<NONE>";
+          user = "<unknown>";
 #endif
         }
 
@@ -240,6 +249,15 @@ DS2_ATTRIBUTE_NORETURN static void ListProcesses() {
 __declspec(dllexport)
 #endif
 int main(int argc, char **argv) {
+#if defined(OS_POSIX)
+  // When ds2 is launched inside the lldb test-runner, python will leak file
+  // descriptors to its inferior (ds2). Clean up these file descriptors before
+  // running.
+  for (int i = 3; i < 1024; ++i) {
+    ::close(i);
+  }
+#endif
+
   // clang-format on
   std::ostringstream ss;
   for (int i = 0; i < argc; ++i)
@@ -273,7 +291,7 @@ int main(int argc, char **argv) {
   // Logging options.
   opts.addOption(ds2::OptParse::stringOption, "log-file", 'o',
                  "output log messages to the file specified");
-  opts.addOption(ds2::OptParse::boolOption, "debug-remote", 'D',
+  opts.addOption(ds2::OptParse::boolOption, "remote-debug", 'D',
                  "enable log for remote protocol packets");
   opts.addOption(ds2::OptParse::boolOption, "debug", 'd',
                  "enable debug log output");
@@ -303,8 +321,14 @@ int main(int argc, char **argv) {
                  "determine a port dynamically and write back to FIFO");
   opts.addOption(ds2::OptParse::boolOption, "native-regs", 'r',
                  "use native registers (no-op)", true);
+#if defined(OS_POSIX)
   opts.addOption(ds2::OptParse::boolOption, "setsid", 'S',
-                 "make ds2 run in its own session (no-op)", true);
+                 "make ds2 run in its own session");
+#endif
+
+  // gdbserver compatibility options
+  opts.addOption(ds2::OptParse::boolOption, "once", 'O',
+                 "exit after one execution of inferior (default)", true);
 
   if (argc < 2)
     opts.usageDie("first argument must be g[dbserver] or p[latform]");
@@ -335,12 +359,13 @@ int main(int argc, char **argv) {
       DS2LOG(Error, "unable to open %s for writing: %s",
              opts.getString("log-file").c_str(), strerror(errno));
     } else {
-#if !defined(OS_WIN32)
+#if defined(OS_POSIX)
       // When ds2 is spawned by an app (e.g.: on Android), it will run with the
       // app's user/group ID, and will create its log file owned by the app. By
       // default, the permissions will be 0600 (rw-------) which makes us
       // unable to get the log files. chmod() them to be able to access them.
       fchmod(fileno(stream), 0644);
+      fcntl(fileno(stream), F_SETFD, FD_CLOEXEC);
 #endif
       ds2::SetLogColorsEnabled(false);
       ds2::SetLogOutputStream(stream);
@@ -348,10 +373,14 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (opts.getBool("debug-remote")) {
+  if (opts.getBool("remote-debug")) {
     ds2::SetLogLevel(ds2::kLogLevelPacket);
   } else if (opts.getBool("debug")) {
     ds2::SetLogLevel(ds2::kLogLevelDebug);
+#if !defined(OS_WIN32)
+  } else if (mode == kRunModeSlave) {
+    ds2::SetLogLevel(ds2::kLogLevelWarning);
+#endif
   }
 
   if (opts.getBool("no-colors")) {
@@ -424,6 +453,12 @@ int main(int argc, char **argv) {
   // write it back to the FIFO passed as argument for the test harness to use
   // it.
   namedPipePath = opts.getString("named-pipe");
+
+#if defined(OS_POSIX)
+  if (opts.getBool("setsid")) {
+    ::setsid();
+  }
+#endif
 
   // Default host and port options.
   if (port.empty()) {

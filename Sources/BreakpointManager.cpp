@@ -13,7 +13,7 @@
 
 namespace ds2 {
 
-BreakpointManager::BreakpointManager(Target::Process *process)
+BreakpointManager::BreakpointManager(Target::ProcessBase *process)
     : _enabled(false), _process(process) {}
 
 BreakpointManager::~BreakpointManager() {
@@ -24,10 +24,7 @@ void BreakpointManager::clear() { _sites.clear(); }
 
 ErrorCode BreakpointManager::add(Address const &address, Type type, size_t size,
                                  Mode mode) {
-  ErrorCode error = kSuccess;
-
-  if (!address.valid())
-    return kErrorInvalidArgument;
+  CHK(isValid(address, size, mode));
 
   auto it = _sites.find(address);
   if (it != _sites.end()) {
@@ -48,15 +45,14 @@ ErrorCode BreakpointManager::add(Address const &address, Type type, size_t size,
     site.mode = mode;
     site.size = size;
 
-    //
     // If the breakpoint manager is already in enabled state, enable
     // the newly added breakpoint too.
-    //
-    if (_enabled)
-      error = enableLocation(site);
+    if (_enabled) {
+      return enableLocation(site);
+    }
   }
 
-  return error;
+  return kSuccess;
 }
 
 ErrorCode BreakpointManager::remove(Address const &address) {
@@ -152,7 +148,7 @@ void BreakpointManager::disable() {
   }
 }
 
-bool BreakpointManager::hit(Address const &address) {
+bool BreakpointManager::hit(Address const &address, Site &site) {
   if (!address.valid())
     return false;
 
@@ -160,14 +156,23 @@ bool BreakpointManager::hit(Address const &address) {
   if (it == _sites.end())
     return false;
 
+  //
+  // If this breakpoint type becomes 0, it will be erased after calling
+  // BreakpointManager::disable
+  //
   it->second.type =
       static_cast<Type>(it->second.type & ~kTypeTemporaryUntilHit);
-  if (!it->second.type) {
-    // refs should always be 0 unless we have a kTypePermanent breakpoint.
-    DS2ASSERT(it->second.refs == 0);
-    _sites.erase(it);
+
+  site = it->second;
+  return true;
+}
+
+ErrorCode BreakpointManager::isValid(Address const &address, size_t size,
+                                     Mode mode) const {
+  if (!address.valid()) {
+    return kErrorInvalidArgument;
   }
 
-  return true;
+  return kSuccess;
 }
 }

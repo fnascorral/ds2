@@ -19,32 +19,29 @@ namespace ARM {
 
 class HardwareBreakpointManager : public BreakpointManager {
 public:
-  HardwareBreakpointManager(Target::Process *process);
+  HardwareBreakpointManager(Target::ProcessBase *process);
   ~HardwareBreakpointManager() override;
 
 public:
-  virtual ErrorCode add(Address const &address, Type type, size_t size,
-                        Mode mode) override {
+  ErrorCode add(Address const &address, Type type, size_t size,
+                Mode mode) override {
     return kErrorUnsupported;
   };
 
-protected:
-  virtual bool hit(Target::Thread *thread) override { return false; };
+public:
+  int hit(Target::Thread *thread, Site &site) override { return -1; };
 
 protected:
-  virtual ErrorCode enableLocation(Site const &site) override {
+  ErrorCode enableLocation(Site const &site) override {
     return kErrorUnsupported;
   };
 
-  virtual ErrorCode disableLocation(Site const &site) override {
+  ErrorCode disableLocation(Site const &site) override {
     return kErrorUnsupported;
   };
 
 public:
   virtual int maxWatchpoints();
-
-protected:
-  friend Target::ProcessBase;
 
 private:
   int _maxBreakpoints;

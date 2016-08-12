@@ -38,6 +38,7 @@ protected:
 
 public:
   bool setExecutable(std::string const &path);
+  bool setShellCommand(std::string const &command);
   bool setWorkingDirectory(std::string const &path);
 
 public:
@@ -72,6 +73,9 @@ public:
   bool redirectErrorToBuffer() { return false; }
 
 public:
+  bool redirectInputToTerminal() { return false; }
+
+public:
   bool redirectOutputToDelegate(RedirectDelegate delegate) { return false; }
   bool redirectErrorToDelegate(RedirectDelegate delegate) { return false; }
 
@@ -90,6 +94,8 @@ public:
   inline int signalCode() const { return 0; }
 
 public:
+  ErrorCode input(ByteVector const &buf) { return kErrorUnsupported; }
+
   inline std::string const &output() const {
     static std::string s;
     return s;

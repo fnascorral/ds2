@@ -36,10 +36,10 @@ protected: // Common
   virtual ErrorCode onSetMaxPacketSize(Session &session, size_t size) = 0;
   virtual ErrorCode onSetMaxPayloadSize(Session &session, size_t size) = 0;
 
-  virtual void onSetLogging(Session &session, std::string const &mode,
-                            std::string const &filename,
-                            StringCollection const &flags) = 0;
-
+  virtual ErrorCode onSetLogging(Session &session, std::string const &mode,
+                                 std::string const &filename,
+                                 StringCollection const &flags) = 0;
+  virtual ErrorCode onSendInput(Session &session, ByteVector const &buf) = 0;
   virtual ErrorCode
   onAllowOperations(Session &session,
                     std::map<std::string, bool> const &operations) = 0;
@@ -53,6 +53,10 @@ protected: // Common
   virtual ErrorCode onQueryServerVersion(Session &session,
                                          ServerVersion &version) const = 0;
   virtual ErrorCode onQueryHostInfo(Session &session, HostInfo &info) const = 0;
+
+  virtual ErrorCode onQueryFileLoadAddress(Session &session,
+                                           std::string const &file_path,
+                                           Address &address) = 0;
 
 protected: // Debugging Session
   virtual ErrorCode onEnableControlAgent(Session &session, bool enable) = 0;
@@ -105,7 +109,7 @@ protected: // Debugging Session
   virtual ErrorCode onInterrupt(Session &session) = 0;
   virtual ErrorCode onTerminate(Session &session, ProcessThreadId const &ptid,
                                 StopInfo &stop) = 0;
-  virtual ErrorCode onTerminate(Session &session, ProcessId pid) = 0;
+  virtual ErrorCode onExitServer(Session &session) = 0;
 
   virtual ErrorCode onSynchronizeThreadState(Session &session,
                                              ProcessId pid) = 0;
@@ -172,10 +176,9 @@ protected: // Debugging Session
                                          std::string const &value) = 0;
 
   virtual ErrorCode onReadMemory(Session &session, Address const &address,
-                                 size_t length, std::string &data) = 0;
+                                 size_t length, ByteVector &data) = 0;
   virtual ErrorCode onWriteMemory(Session &session, Address const &address,
-                                  std::string const &data,
-                                  size_t &nwritten) = 0;
+                                  ByteVector const &data, size_t &nwritten) = 0;
 
   virtual ErrorCode onAllocateMemory(Session &session, size_t size,
                                      uint32_t permissions,
@@ -248,38 +251,20 @@ protected: // Platform Session
                                           uint32_t mode) = 0;
 
   virtual ErrorCode onFileOpen(Session &session, std::string const &path,
-                               uint32_t flags, uint32_t mode, int &fd) = 0;
+                               OpenFlags flags, uint32_t mode, int &fd) = 0;
   virtual ErrorCode onFileClose(Session &session, int fd) = 0;
-  virtual ErrorCode onFileRead(Session &session, int fd, size_t count,
-                               uint64_t offset, std::string &buffer) = 0;
+  virtual ErrorCode onFileRead(Session &session, int fd, uint64_t &count,
+                               uint64_t offset, ByteVector &buffer) = 0;
   virtual ErrorCode onFileWrite(Session &session, int fd, uint64_t offset,
-                                std::string const &buffer,
-                                size_t &nwritten) = 0;
+                                ByteVector const &buffer,
+                                uint64_t &nwritten) = 0;
 
   virtual ErrorCode onFileRemove(Session &session, std::string const &path) = 0;
   virtual ErrorCode onFileReadLink(Session &session, std::string const &path,
                                    std::string &resolved) = 0;
-
-#if 0
-    //
-    // more F packets:
-    // https://sourceware.org/gdb/onlinedocs/gdb/List-of-Supported-Calls.html#List-of-Supported-Calls
-    //
-    virtual ErrorCode onGetCurrentTime(Session &session, TimeValue &tv) = 0;
-
-    virtual ErrorCode onFileIsATTY(Session &session, int fd) = 0;
-    virtual ErrorCode onFileRename(Session &session,
-            std::string const &oldPath, std::string const &newPath) = 0;
-
-    virtual ErrorCode onFileGetStat(Session &session, std::string const &path,
-            FileStat &stat) = 0;
-    virtual ErrorCode onFileGetStat(Session &session, int fd,
-            FileStat &stat) = 0;
-
-    virtual ErrorCode onFileSeek(Session &session, int fd,
-            int64_t offset, int whence, int64_t &newOffset) = 0;
-#endif
-
+  virtual ErrorCode onFileSetPermissions(Session &session,
+                                         std::string const &path,
+                                         uint32_t mode) = 0;
   virtual ErrorCode onFileExists(Session &session, std::string const &path) = 0;
   virtual ErrorCode onFileComputeMD5(Session &session, std::string const &path,
                                      uint8_t digest[16]) = 0;
@@ -307,11 +292,11 @@ protected: // Platform Session
                                             std::string &workingDir) const = 0;
 
 protected: // System Session
-  virtual void onReset(Session &session) = 0;
+  virtual ErrorCode onReset(Session &session) = 0;
   virtual ErrorCode onFlashErase(Session &session, Address const &address,
                                  size_t length) = 0;
   virtual ErrorCode onFlashWrite(Session &session, Address const &address,
-                                 std::string const &data) = 0;
+                                 ByteVector const &data) = 0;
   virtual ErrorCode onFlashDone(Session &session) = 0;
 };
 }

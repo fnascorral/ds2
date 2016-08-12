@@ -163,9 +163,9 @@ void ProtocolInterpreter::onCommand(std::string const &command,
     DS2LOG(Packet, "handler for command '%s' unknown", command.c_str());
 
     //
-    // The handler couldn't be found, send a NAK.
+    // The handler couldn't be found, we don't support this packet.
     //
-    _session->sendNAK();
+    _session->sendError(kErrorUnsupported);
     return;
   }
 
@@ -180,7 +180,7 @@ void ProtocolInterpreter::onCommand(std::string const &command,
   extra += arguments;
 
   if (extra.find_first_of("*}") != std::string::npos) {
-    extra = Uncompress(extra);
+    extra = Unescape(extra);
     DS2LOG(Packet, "args='%.*s'", static_cast<int>(extra.length()), &extra[0]);
   }
 

@@ -11,20 +11,20 @@
 #define __DS2_LOG_CLASS_NAME__ "Target::Thread"
 
 #include "DebugServer2/Target/Linux/Thread.h"
-#if defined(ARCH_ARM)
-#include "DebugServer2/Architecture/ARM/SoftwareSingleStep.h"
-#endif
+#include "DebugServer2/Host/Linux/ExtraWrappers.h"
 #include "DebugServer2/Host/Linux/PTrace.h"
 #include "DebugServer2/Host/Linux/ProcFS.h"
 #include "DebugServer2/SoftwareBreakpointManager.h"
 #include "DebugServer2/Target/Process.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 
 using ds2::Host::Linux::ProcFS;
+using ds2::Utils::Stringify;
 
 #define super ds2::Target::POSIX::Thread
 
@@ -32,182 +32,50 @@ namespace ds2 {
 namespace Target {
 namespace Linux {
 
-Thread::Thread(Process *process, ThreadId tid) : super(process, tid) {
-  //
-  // Initially the thread is stopped.
-  //
-  _state = kStopped;
-}
+Thread::Thread(Process *process, ThreadId tid) : super(process, tid) {}
 
-Thread::~Thread() = default;
+void Thread::fillWatchpointData() {
+  HardwareBreakpointManager *hwBpm = process()->hardwareBreakpointManager();
 
-ErrorCode Thread::terminate() {
-  return process()->ptrace().kill(ProcessThreadId(process()->pid(), tid()),
-                                  SIGKILL);
-}
+  if (hwBpm) {
+    BreakpointManager::Site site;
 
-ErrorCode Thread::suspend() {
-  ErrorCode error = kSuccess;
-  if (_state == kRunning) {
-    error =
-        process()->ptrace().suspend(ProcessThreadId(process()->pid(), tid()));
-    if (error != kSuccess)
-      return error;
-
-    int status;
-    error = process()->ptrace().wait(ProcessThreadId(process()->pid(), tid()),
-                                     &status);
-    if (error != kSuccess) {
-      DS2LOG(Error, "failed to wait for tid %d, error=%s\n", tid(),
-             strerror(errno));
-      return error;
-    }
-
-    updateStopInfo(status);
-  }
-
-  if (_state == kTerminated) {
-    error = kErrorProcessNotFound;
-  }
-
-  return error;
-}
-
-#if defined(ARCH_ARM)
-ErrorCode Thread::step(int signal, Address const &address) {
-  if (_state == kInvalid || _state == kRunning) {
-    return kErrorInvalidArgument;
-  } else if (_state == kTerminated) {
-    return kErrorProcessNotFound;
-  }
-
-  DS2LOG(Debug, "stepping tid %d", tid());
-
-  // Prepare a software (arch-dependent) single step and resume execution.
-  Architecture::CPUState state;
-  ErrorCode error = readCPUState(state);
-  if (error != kSuccess) {
-    return error;
-  }
-
-  error = PrepareSoftwareSingleStep(
-      process(), process()->softwareBreakpointManager(), state, address);
-  if (error != kSuccess) {
-    return error;
-  }
-
-  return resume(signal, address);
-}
-#else
-ErrorCode Thread::step(int signal, Address const &address) {
-  if (_state == kInvalid || _state == kRunning) {
-    return kErrorInvalidArgument;
-  } else if (_state == kTerminated) {
-    return kErrorProcessNotFound;
-  }
-
-  DS2LOG(Debug, "stepping tid %d", tid());
-
-  ProcessInfo info;
-  ErrorCode error = process()->getInfo(info);
-  if (error != kSuccess) {
-    return error;
-  }
-
-  error = process()->ptrace().step(ProcessThreadId(process()->pid(), tid()),
-                                   info, signal, address);
-  if (error != kSuccess) {
-    return error;
-  }
-
-  _state = kStepped;
-  return kSuccess;
-}
-#endif
-
-ErrorCode Thread::resume(int signal, Address const &address) {
-  ErrorCode error = kSuccess;
-
-  if (_state == kStopped || _state == kStepped) {
-    if (signal == 0) {
-      switch (_stopInfo.signal) {
-      case SIGCHLD:
-      case SIGSTOP:
-      case SIGTRAP:
-        signal = 0;
-        break;
+    if (hwBpm->hit(this, site) >= 0) {
+      switch (static_cast<int>(site.mode)) {
+      case BreakpointManager::kModeExec:
+        _stopInfo.reason = StopInfo::kReasonBreakpoint;
+        return;
+      case BreakpointManager::kModeWrite:
+        _stopInfo.reason = StopInfo::kReasonWriteWatchpoint;
+        return;
+      case BreakpointManager::kModeRead:
+        _stopInfo.reason = StopInfo::kReasonReadWatchpoint;
+        return;
+      case BreakpointManager::kModeRead | BreakpointManager::kModeWrite:
+        _stopInfo.reason = StopInfo::kReasonAccessWatchpoint;
+        return;
       default:
-        signal = _stopInfo.signal;
-        break;
+        DS2BUG("invalid mode");
       }
     }
-
-    ProcessInfo info;
-
-    error = process()->getInfo(info);
-    if (error != kSuccess)
-      return error;
-
-    error = process()->ptrace().resume(ProcessThreadId(process()->pid(), tid()),
-                                       info, signal, address);
-    if (error == kSuccess) {
-      _state = kRunning;
-      _stopInfo.signal = 0;
-    }
-  } else if (_state == kTerminated) {
-    error = kErrorProcessNotFound;
   }
 
-  return error;
-}
-
-ErrorCode Thread::readCPUState(Architecture::CPUState &state) {
-  // TODO cache CPU state
-  ProcessInfo info;
-  ErrorCode error;
-
-  error = _process->getInfo(info);
-  if (error != kSuccess)
-    return error;
-
-  return process()->ptrace().readCPUState(
-      ProcessThreadId(process()->pid(), tid()), info, state);
-}
-
-ErrorCode Thread::writeCPUState(Architecture::CPUState const &state) {
-  ProcessInfo info;
-  ErrorCode error;
-
-  error = _process->getInfo(info);
-  if (error != kSuccess)
-    return error;
-
-  return process()->ptrace().writeCPUState(
-      ProcessThreadId(process()->pid(), tid()), info, state);
+  _stopInfo.reason = StopInfo::kReasonTrace;
 }
 
 ErrorCode Thread::updateStopInfo(int waitStatus) {
   super::updateStopInfo(waitStatus);
 
-  // First check to make sure the thread has not exited yet.
-  // If exited, return success early rather than updating the thread state.
-  if (_stopInfo.event == StopInfo::kEventExit) {
-    DS2ASSERT(_stopInfo.reason == StopInfo::kReasonNone);
-    return kSuccess;
-  }
-
-  updateState();
-
   switch (_stopInfo.event) {
-  case StopInfo::kEventNone:
-    DS2BUG("thread stopped for unknown reason, status=%#x", waitStatus);
-
   case StopInfo::kEventExit:
   case StopInfo::kEventKill:
     DS2ASSERT(_stopInfo.reason == StopInfo::kReasonNone);
+    _state = kTerminated;
     return kSuccess;
 
   case StopInfo::kEventStop: {
+    _state = kStopped;
+
     // These are the reasons why we might want to alter the stop info of a
     // thread:
     // (1) a thread traced with PTRACE_O_TRACECLONE calls clone(2), it (the
@@ -219,14 +87,18 @@ ErrorCode Thread::updateStopInfo(int waitStatus) {
     //     WSTOPSIG(status) == SIGTRAP. We mark the thread stopped for no
     //     reason so it just gets restarted immediately (see
     //     Linux::Process::wait);
-    // (2) we sent the thread a SIGSTOP (with tkill) to interrupt it e.g.:
-    //     a thread hits a breakpoint, we have to stop every other thread.
-    //     These other treads will be mark as no reason so the debugger can
+    // (2) we sent the thread a SIGSTOP (with tkill(2)) to suspend it e.g.:
+    //     when a thread hits a breakpoint, we have to stop every other thread,
+    //     so we send each one of them a SIGSTOP with tkill(2). These other
+    //     treads will be marked as stopped for no reason so the debugger can
     //     adapt its output (e.g.: lldb will simply hide these threads and only
     //     display the one that stopped for a breakpoint);
-    // (3) the inferior received a SIGSTOP because of ptrace attach. We have to
+    // (3) we sent the process a SIGSTOP (with kill(2)) to interrupt it
+    //     entirely. This happens when the user hits Ctrl-C and the debugger
+    //     sends us a "\x03" for instance;
+    // (4) the inferior received a SIGSTOP because of ptrace attach. We have to
     //     mark the thread as stopped for a trap;
-    // (4) the inferior received a SIGTRAP. This is usually because of a
+    // (5) the inferior received a SIGTRAP. This is usually because of a
     //     breakpoint, single step or such;
 
     siginfo_t si;
@@ -241,15 +113,31 @@ ErrorCode Thread::updateStopInfo(int waitStatus) {
     if (waitStatus >> 8 == (SIGTRAP | (PTRACE_EVENT_CLONE << 8))) { // (1)
       _stopInfo.event = StopInfo::kEventNone;
     } else if (si.si_code == SI_TKILL && si.si_pid == getpid()) { // (2)
-      // The only signal we are supposed to send to the inferior is a
-      // SIGSTOP anyway.
+      // The only signal we are supposed to send to the inferior is a SIGSTOP.
       DS2ASSERT(_stopInfo.signal == SIGSTOP);
       _stopInfo.event = StopInfo::kEventNone;
+    } else if (si.si_code == SI_USER && si.si_pid == getpid()) { // (3)
+      DS2ASSERT(_stopInfo.signal == SIGSTOP);
+      _stopInfo.reason = StopInfo::kReasonSignalStop;
     } else if (si.si_code == SI_USER && si.si_pid == 0 &&
-               _stopInfo.signal == SIGSTOP) { // (3)
+               _stopInfo.signal == SIGSTOP) { // (4)
       _stopInfo.reason = StopInfo::kReasonTrap;
-    } else if (_stopInfo.signal == SIGTRAP) { // (4)
-      _stopInfo.reason = StopInfo::kReasonBreakpoint;
+    } else if (_stopInfo.signal == SIGTRAP) { // (5)
+      switch (si.si_code) {
+      case 0:
+        _stopInfo.reason = StopInfo::kReasonTrap;
+        break;
+      case TRAP_HWBKPT:
+      case TRAP_TRACE:
+        fillWatchpointData();
+        break;
+      case SI_KERNEL:
+      case TRAP_BRKPT:
+        _stopInfo.reason = StopInfo::kReasonBreakpoint;
+        break;
+      default:
+        DS2BUG("unknown sigtrap code");
+      }
     } else {
       // This is not a signal that we originated. We can output a
       // warning if the signal comes from an external source.
@@ -261,6 +149,10 @@ ErrorCode Thread::updateStopInfo(int waitStatus) {
                tid(), strsignal(_stopInfo.signal), si.si_pid);
     }
   } break;
+
+  default:
+    DS2BUG("impossible StopInfo event: %s",
+           Stringify::StopEvent(_stopInfo.event));
   }
 
   return kSuccess;
@@ -303,6 +195,16 @@ void Thread::updateState() {
     break;
   }
 }
+
+#if defined(ARCH_X86) || defined(ARCH_X86_64)
+uintptr_t Thread::readDebugReg(size_t idx) const {
+  return process()->ptrace().readDebugReg(tid(), idx);
+}
+
+ErrorCode Thread::writeDebugReg(size_t idx, uintptr_t val) const {
+  return process()->ptrace().writeDebugReg(tid(), idx, val);
+}
+#endif
 }
 }
 }

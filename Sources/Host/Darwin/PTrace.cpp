@@ -19,23 +19,13 @@
 #include <csignal>
 #include <cstdio>
 #include <limits>
+#include <sys/ptrace.h>
 
 #define super ds2::Host::POSIX::PTrace
 
 namespace ds2 {
 namespace Host {
 namespace Darwin {
-
-PTrace::PTrace() : _privateData(nullptr) {}
-
-PTrace::~PTrace() { doneCPUState(); }
-
-ErrorCode PTrace::traceMe(bool disableASLR) {
-  if (wrapPtrace(PT_TRACE_ME, 0, nullptr, nullptr) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
-}
 
 ErrorCode PTrace::traceThat(ProcessId pid) {
   if (pid <= 0)
@@ -64,99 +54,25 @@ ErrorCode PTrace::kill(ProcessThreadId const &ptid, int signal) {
 ErrorCode PTrace::readString(ProcessThreadId const &ptid,
                              Address const &address, std::string &str,
                              size_t length, size_t *count) {
-  char buf[length];
-  ErrorCode err = readMemory(ptid, address, buf, length, count);
-  if (err != kSuccess)
-    return err;
-
-  if (strnlen(buf, length) == length)
-    return kErrorNameTooLong;
-
-  str = std::string(buf);
-  return kSuccess;
+  DS2BUG("impossible to use ptrace to %s on Darwin", __FUNCTION__);
 }
 
 ErrorCode PTrace::readMemory(ProcessThreadId const &ptid,
                              Address const &address, void *buffer,
                              size_t length, size_t *count) {
-  DS2BUG("not implemented");
-  return kErrorUnsupported;
+  DS2BUG("impossible to use ptrace to %s on Darwin", __FUNCTION__);
 }
 
 ErrorCode PTrace::writeMemory(ProcessThreadId const &ptid,
                               Address const &address, void const *buffer,
                               size_t length, size_t *count) {
-  DS2BUG("not implemented");
-  return kErrorUnsupported;
+  DS2BUG("impossible to use ptrace to %s on Darwin", __FUNCTION__);
 }
 
 ErrorCode PTrace::suspend(ProcessThreadId const &ptid) {
-  pid_t pid;
-
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
-    return error;
-
-  if (kill(pid, SIGSTOP) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
-}
-
-ErrorCode PTrace::step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
-                       int signal, Address const &address) {
-  pid_t pid;
-
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
-    return error;
-
-  //
-  // Continuation from address?
-  //
-  if (address.valid()) {
-    Architecture::CPUState state;
-    ErrorCode error = readCPUState(ptid, pinfo, state);
-    if (error != kSuccess)
-      return error;
-
-    state.setPC(address);
-
-    error = writeCPUState(ptid, pinfo, state);
-    if (error != kSuccess)
-      return error;
-  }
-
-  // (caddr_t)1 indicate that execution is to pick up where it left off.
-  if (wrapPtrace(PT_STEP, pid, (caddr_t)1, signal) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
-}
-
-ErrorCode PTrace::resume(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
-                         int signal, Address const &address) {
-  pid_t pid;
-  caddr_t addr;
-
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
-    return error;
-
-  //
-  // Continuation from address?
-  //
-  if (address.valid()) {
-    addr = (caddr_t)address.value();
-  } else {
-    // (caddr_t)1 indicate that execution is to pick up where it left off.
-    addr = (caddr_t)1;
-  }
-
-  if (wrapPtrace(PT_CONTINUE, pid, addr, signal) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
+  // TODO(sas): I don't think this will work. Not sure we can send signal to
+  // individual threads on Darwin.
+  return PTrace::kill(ptid, SIGSTOP);
 }
 
 ErrorCode PTrace::getSigInfo(ProcessThreadId const &ptid, siginfo_t &si) {

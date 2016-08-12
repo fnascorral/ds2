@@ -10,11 +10,10 @@
 
 #define __DS2_LOG_CLASS_NAME__ "Target::Process"
 
-#include "DebugServer2/Target/FreeBSD/Process.h"
+#include "DebugServer2/Target/Process.h"
 #include "DebugServer2/BreakpointManager.h"
 #include "DebugServer2/Host/FreeBSD/PTrace.h"
 #include "DebugServer2/Host/FreeBSD/ProcStat.h"
-#include "DebugServer2/Host/POSIX/AsyncProcessWaiter.h"
 #include "DebugServer2/Target/FreeBSD/Thread.h"
 #include "DebugServer2/Utils/Log.h"
 
@@ -36,29 +35,6 @@ using ds2::Host::FreeBSD::ProcStat;
 namespace ds2 {
 namespace Target {
 namespace FreeBSD {
-
-Process::Process()
-    : super(), _softwareBreakpointManager(nullptr),
-      _hardwareBreakpointManager(nullptr), _terminated(false) {}
-
-Process::~Process() { terminate(); }
-
-ErrorCode Process::initialize(ProcessId pid, uint32_t flags) {
-  int status;
-
-  // Wait the main thread.
-  ErrorCode error = ptrace().wait(pid, &status);
-  if (error != kSuccess)
-    return error;
-
-  ptrace().traceThat(pid);
-
-  error = super::initialize(pid, flags);
-  if (error != kSuccess)
-    return error;
-
-  return attach(status);
-}
 
 ErrorCode Process::attach(int waitStatus) {
   struct ptrace_lwpinfo lwpinfo;
@@ -201,8 +177,7 @@ continue_waiting:
 
   switch (_currentThread->_stopInfo.event) {
   case StopInfo::kEventNone:
-    switch (_currentThread->_stopInfo.reason) {
-    case StopInfo::kReasonNone:
+    if (_currentThread->_stopInfo.reason == StopInfo::kReasonNone) {
       ptrace().resume(ProcessThreadId(_pid, tid), info);
       goto continue_waiting;
     }
@@ -402,33 +377,6 @@ ErrorCode Process::getMemoryRegionInfo(Address const &address,
   }
 
   return kErrorNotFound;
-}
-
-ErrorCode Process::readString(Address const &address, std::string &str,
-                              size_t length, size_t *count) {
-  if (_currentThread == nullptr)
-    return super::readString(address, str, length, count);
-
-  return ptrace().readString(_currentThread->tid(), address, str, length,
-                             count);
-}
-
-ErrorCode Process::readMemory(Address const &address, void *data, size_t length,
-                              size_t *count) {
-  if (_currentThread == nullptr)
-    return super::readMemory(address, data, length, count);
-
-  return ptrace().readMemory(_currentThread->tid(), address, data, length,
-                             count);
-}
-
-ErrorCode Process::writeMemory(Address const &address, void const *data,
-                               size_t length, size_t *count) {
-  if (_currentThread == nullptr)
-    return super::writeMemory(address, data, length, count);
-
-  return ptrace().writeMemory(_currentThread->tid(), address, data, length,
-                              count);
 }
 
 void Process::rescanThreads()

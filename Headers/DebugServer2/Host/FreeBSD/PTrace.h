@@ -22,11 +22,6 @@ struct PTracePrivateData;
 
 class PTrace : public POSIX::PTrace {
 public:
-  PTrace();
-  virtual ~PTrace();
-
-public:
-  virtual ErrorCode traceMe(bool disableASLR);
   virtual ErrorCode traceThat(ProcessId pid);
 
 public:
@@ -52,28 +47,11 @@ public:
                                   Architecture::CPUState const &state);
 
 public:
-  virtual ErrorCode suspend(ProcessThreadId const &ptid);
-
-public:
-  virtual ErrorCode step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
-                         int signal = 0, Address const &address = Address());
-  virtual ErrorCode resume(ProcessThreadId const &ptid,
-                           ProcessInfo const &pinfo, int signal = 0,
-                           Address const &address = Address());
-
-public:
   virtual ErrorCode getLwpInfo(ProcessThreadId const &ptid,
                                struct ptrace_lwpinfo *lwpinfo);
 
 public:
   virtual ErrorCode getSigInfo(ProcessThreadId const &ptid, siginfo_t &si);
-
-protected:
-  void initCPUState(ProcessId pid);
-  void doneCPUState();
-
-public:
-  PTracePrivateData *_privateData;
 };
 }
 }

@@ -17,9 +17,11 @@
 
 #include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <cstdio>
 #include <limits>
-#include <sys/personality.h>
+#include <sys/uio.h>
+#include <sys/user.h>
 #include <sys/wait.h>
 
 #define super ds2::Host::POSIX::PTrace
@@ -27,10 +29,6 @@
 namespace ds2 {
 namespace Host {
 namespace Linux {
-
-PTrace::PTrace() : _privateData(nullptr) {}
-
-PTrace::~PTrace() { doneCPUState(); }
 
 ErrorCode PTrace::wait(ProcessThreadId const &ptid, int *status) {
   pid_t pid;
@@ -61,10 +59,7 @@ ErrorCode PTrace::traceMe(bool disableASLR) {
     }
   }
 
-  if (wrapPtrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
+  return super::traceMe(false);
 }
 
 ErrorCode PTrace::traceThat(ProcessId pid) {
@@ -240,99 +235,49 @@ ErrorCode PTrace::writeMemory(ProcessThreadId const &ptid,
   return kSuccess;
 }
 
-ErrorCode PTrace::suspend(ProcessThreadId const &ptid) {
-  pid_t pid;
+ErrorCode PTrace::prepareAddressForResume(ProcessThreadId const &ptid,
+                                          ProcessInfo const &pinfo,
+                                          Address const &address) {
+  if (address.valid()) {
+    Architecture::CPUState state;
+    ErrorCode error = readCPUState(ptid, pinfo, state);
+    if (error != kSuccess) {
+      return error;
+    }
 
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
-    return error;
+    state.setPC(address);
 
-  if (tkill(pid, SIGSTOP) < 0)
-    return Platform::TranslateError();
+    error = writeCPUState(ptid, pinfo, state);
+    if (error != kSuccess) {
+      return error;
+    }
+  }
 
   return kSuccess;
 }
 
 ErrorCode PTrace::step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
                        int signal, Address const &address) {
-  pid_t pid;
-
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
-    return error;
-
-#if defined(__arm__)
-  //
-  // Single stepping for this architecture is not implemented.
-  //
-  return kErrorUnsupported;
+#if defined(ARCH_ARM)
+  DS2BUG("single stepping for ARM must be implemented in software");
 #endif
 
-  //
-  // Continuation from address?
-  //
-  if (address.valid()) {
-    Architecture::CPUState state;
-    ErrorCode error = readCPUState(ptid, pinfo, state);
-    if (error != kSuccess)
-      return error;
-
-    state.setPC(address);
-
-    error = writeCPUState(ptid, pinfo, state);
-    if (error != kSuccess)
-      return error;
+  ErrorCode error = prepareAddressForResume(ptid, pinfo, address);
+  if (error != kSuccess) {
+    return error;
   }
 
-  if (wrapPtrace(PTRACE_SINGLESTEP, pid, nullptr, signal) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
+  return super::step(ptid, pinfo, signal);
 }
 
 ErrorCode PTrace::resume(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
                          int signal, Address const &address) {
-  pid_t pid;
-
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
+  ErrorCode error = prepareAddressForResume(ptid, pinfo, address);
+  if (error != kSuccess) {
     return error;
-
-  //
-  // Continuation from address?
-  //
-  if (address.valid()) {
-    Architecture::CPUState state;
-    ErrorCode error = readCPUState(ptid, pinfo, state);
-    if (error != kSuccess)
-      return error;
-
-    state.setPC(address);
-
-    error = writeCPUState(ptid, pinfo, state);
-    if (error != kSuccess)
-      return error;
   }
 
-  if (wrapPtrace(PTRACE_CONT, pid, nullptr, signal) < 0)
-    return Platform::TranslateError();
-
-  return kSuccess;
-}
-
-ErrorCode PTrace::getEventPid(ProcessThreadId const &ptid, ProcessId &epid) {
-  pid_t pid;
-
-  ErrorCode error = ptidToPid(ptid, pid);
-  if (error != kSuccess)
-    return error;
-
-  unsigned long value;
-  if (wrapPtrace(PTRACE_GETEVENTMSG, pid, nullptr, &value) < 0)
-    return Platform::TranslateError();
-
-  epid = value;
-  return kSuccess;
+  return super::resume(ptid, pinfo, signal);
 }
 
 ErrorCode PTrace::getSigInfo(ProcessThreadId const &ptid, siginfo_t &si) {
@@ -373,6 +318,47 @@ ErrorCode PTrace::writeRegisterSet(ProcessThreadId const &ptid, int regSetCode,
 
   return kSuccess;
 }
+
+#if defined(ARCH_X86) || defined(ARCH_X86_64)
+static size_t computeDebugRegOffset(int idx) {
+  size_t debugOffset = offsetof(struct user, u_debugreg);
+  size_t regSize = sizeof(((struct user *)0)->u_debugreg[idx]);
+
+  return debugOffset + (regSize * idx);
+}
+
+uintptr_t PTrace::readUserData(ProcessThreadId const &ptid, uint64_t offset) {
+  pid_t pid;
+
+  if (ptidToPid(ptid, pid) != kSuccess)
+    return 0;
+
+  return wrapPtrace(PTRACE_PEEKUSER, pid, offset, nullptr);
+}
+
+ErrorCode PTrace::writeUserData(ProcessThreadId const &ptid, uint64_t offset,
+                                uintptr_t val) {
+  pid_t pid;
+
+  ErrorCode error = ptidToPid(ptid, pid);
+  if (error != kSuccess)
+    return error;
+
+  if (wrapPtrace(PTRACE_POKEUSER, pid, offset, val) < 0)
+    return Platform::TranslateError();
+
+  return kSuccess;
+}
+
+uintptr_t PTrace::readDebugReg(ProcessThreadId const &ptid, size_t idx) {
+  return readUserData(ptid, computeDebugRegOffset(idx));
+}
+
+ErrorCode PTrace::writeDebugReg(ProcessThreadId const &ptid, size_t idx,
+                                uintptr_t val) {
+  return writeUserData(ptid, computeDebugRegOffset(idx), val);
+}
+#endif
 }
 }
 }

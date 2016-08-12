@@ -9,37 +9,100 @@
 //
 
 #include "DebugServer2/Host/Linux/PTrace.h"
+#include "DebugServer2/Architecture/X86/RegisterCopy.h"
 #include "DebugServer2/Host/Linux/ExtraWrappers.h"
 #include "DebugServer2/Host/Platform.h"
-
-#define super ds2::Host::POSIX::PTrace
 
 #include <elf.h>
 #include <sys/ptrace.h>
 #include <sys/uio.h>
 #include <sys/user.h>
 
+#define super ds2::Host::POSIX::PTrace
+
 namespace ds2 {
 namespace Host {
 namespace Linux {
 
-struct PTracePrivateData {
-  uint8_t breakpointCount;
-  uint8_t watchpointCount;
-  uint8_t maxWatchpointSize;
+static inline void user_to_state32(ds2::Architecture::X86::CPUState &state,
+                                   struct xfpregs_struct const &xfpregs) {
+  // X87 State
+  state.x87.fstw = xfpregs.fpregs.swd;
+  state.x87.fctw = xfpregs.fpregs.cwd;
+  state.x87.ftag = xfpregs.fpregs.twd;
+  state.x87.fop = xfpregs.fpregs.fop;
+  state.x87.fiseg = xfpregs.fpregs.fcs;
+  state.x87.fioff = xfpregs.fpregs.fip;
+  state.x87.foseg = xfpregs.fpregs.fos;
+  state.x87.fooff = xfpregs.fpregs.foo;
 
-  PTracePrivateData()
-      : breakpointCount(0), watchpointCount(0), maxWatchpointSize(0) {}
-};
+  auto st_space = reinterpret_cast<uint8_t const *>(xfpregs.fpregs.st_space);
+  static const size_t x87Size = sizeof(state.x87.regs[0].bytes);
+  for (size_t n = 0; n < array_sizeof(state.x87.regs); n++) {
+    memcpy(state.x87.regs[n].bytes, st_space + n * x87Size, x87Size);
+  }
 
-void PTrace::initCPUState(ProcessId pid) {
-  if (_privateData != nullptr)
-    return;
+  // SSE state
+  state.sse.mxcsr = xfpregs.fpregs.mxcsr;
+  state.sse.mxcsrmask = xfpregs.fpregs.reserved;
+  auto xmm_space = reinterpret_cast<uint8_t const *>(xfpregs.fpregs.xmm_space);
+  static const size_t sseSize = sizeof(state.sse.regs[0]);
+  for (size_t n = 0; n < array_sizeof(state.sse.regs); n++) {
+    memcpy(&state.sse.regs[n], xmm_space + n * sseSize, sseSize);
+  }
 
-  _privateData = new PTracePrivateData;
+  //
+  //  EAVX State
+  //
+  auto ymmh = reinterpret_cast<uint8_t const *>(xfpregs.ymmh);
+  static const size_t avxSize = sizeof(state.avx.regs[0]);
+  static const size_t ymmhSize = avxSize - sseSize;
+  for (size_t n = 0; n < array_sizeof(state.avx.regs); n++) {
+    auto avxHigh = reinterpret_cast<uint8_t *>(&state.avx.regs[n]) + sseSize;
+    memcpy(avxHigh, ymmh + n * ymmhSize, ymmhSize);
+  }
 }
 
-void PTrace::doneCPUState() { delete _privateData; }
+static inline void
+state32_to_user(struct xfpregs_struct &xfpregs,
+                ds2::Architecture::X86::CPUState const &state) {
+  // X87 State
+  xfpregs.fpregs.swd = state.x87.fstw;
+  xfpregs.fpregs.cwd = state.x87.fctw;
+  xfpregs.fpregs.twd = state.x87.ftag;
+  xfpregs.fpregs.fop = state.x87.fop;
+  xfpregs.fpregs.fcs = state.x87.fiseg;
+  xfpregs.fpregs.fip = state.x87.fioff;
+  xfpregs.fpregs.fos = state.x87.foseg;
+  xfpregs.fpregs.foo = state.x87.fooff;
+
+  auto st_space = reinterpret_cast<uint8_t *>(xfpregs.fpregs.st_space);
+  static const size_t x87Size = sizeof(state.x87.regs[0].bytes);
+  for (size_t n = 0; n < array_sizeof(state.x87.regs); n++) {
+    memcpy(st_space + n * x87Size, state.x87.regs[n].bytes, x87Size);
+  }
+
+  // SSE state
+  xfpregs.fpregs.mxcsr = state.sse.mxcsr;
+  xfpregs.fpregs.reserved = state.sse.mxcsrmask;
+  auto xmm_space = reinterpret_cast<uint8_t *>(xfpregs.fpregs.xmm_space);
+  static const size_t sseSize = sizeof(state.sse.regs[0]);
+  for (size_t n = 0; n < array_sizeof(state.sse.regs); n++) {
+    memcpy(xmm_space + n * sseSize, &state.sse.regs[n], sseSize);
+  }
+
+  //
+  //  EAVX State
+  //
+  auto ymmh = reinterpret_cast<uint8_t *>(xfpregs.ymmh);
+  static const size_t avxSize = sizeof(state.avx.regs[0]);
+  static const size_t ymmhSize = avxSize - sseSize;
+  for (size_t n = 0; n < array_sizeof(state.avx.regs); n++) {
+    auto avxHigh =
+        reinterpret_cast<const uint8_t *>(&state.avx.regs[n]) + sseSize;
+    memcpy(ymmh + n * ymmhSize, avxHigh, ymmhSize);
+  }
+}
 
 ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid, ProcessInfo const &,
                                Architecture::CPUState &state) {
@@ -50,85 +113,26 @@ ErrorCode PTrace::readCPUState(ProcessThreadId const &ptid, ProcessInfo const &,
     return error;
 
   //
-  // Initialize the CPU state, just in case.
-  //
-  initCPUState(pid);
-
-  //
   // Read GPRs
   //
   user_regs_struct gprs;
   if (wrapPtrace(PTRACE_GETREGS, pid, nullptr, &gprs) < 0)
     return Platform::TranslateError();
 
-  state.gp.eax = gprs.eax;
-  state.gp.ecx = gprs.ecx;
-  state.gp.edx = gprs.edx;
-  state.gp.ebx = gprs.ebx;
-  state.gp.esi = gprs.esi;
-  state.gp.edi = gprs.edi;
-  state.gp.ebp = gprs.ebp;
-  state.gp.esp = gprs.esp;
-  state.gp.eip = gprs.eip;
-  state.gp.cs = gprs.xcs & 0xffff;
-  state.gp.ss = gprs.xss & 0xffff;
-  state.gp.ds = gprs.xds & 0xffff;
-  state.gp.es = gprs.xes & 0xffff;
-  state.gp.fs = gprs.xfs & 0xffff;
-  state.gp.gs = gprs.xgs & 0xffff;
-  state.gp.eflags = gprs.eflags;
-  state.linux_gp.orig_eax = gprs.orig_eax;
+  Architecture::X86::user_to_state32(state, gprs);
 
   //
-  // Read X87 and SSE state
+  // Read SSE and AVX
   //
-  user_fpxregs_struct fxrs;
-  if (wrapPtrace(PTRACE_GETFPXREGS, pid, nullptr, &fxrs) == 0) {
-    // X87 State
-    state.x87.fstw = fxrs.swd;
-    state.x87.fctw = fxrs.cwd;
-    state.x87.ftag = fxrs.twd;
-    state.x87.fop = fxrs.fop;
-    state.x87.fiseg = fxrs.fcs;
-    state.x87.fioff = fxrs.fip;
-    state.x87.foseg = fxrs.fos;
-    state.x87.fooff = fxrs.foo;
+  struct xfpregs_struct xfpregs;
+  struct iovec fpregs_iovec;
+  fpregs_iovec.iov_base = &xfpregs;
+  fpregs_iovec.iov_len = sizeof(xfpregs);
 
-    uint8_t const *st_space = reinterpret_cast<uint8_t const *>(fxrs.st_space);
-    for (size_t n = 0; n < 8; n++) {
-      memcpy(state.x87.regs[n].bytes, st_space + n * 16,
-             sizeof(state.x87.regs[n].bytes));
-    }
-
-    // SSE state
-    state.sse.mxcsr = fxrs.mxcsr;
-    state.sse.mxcsrmask = fxrs.reserved;
-    uint8_t const *xmm_space =
-        reinterpret_cast<uint8_t const *>(fxrs.xmm_space);
-    for (size_t n = 0; n < 8; n++) {
-      memcpy(&state.sse.regs[n], xmm_space + n * 16, sizeof(state.sse.regs[n]));
-    }
-  } else {
-    //
-    // Try reading only X87
-    //
-    user_fpregs_struct fprs;
-    if (wrapPtrace(PTRACE_GETFPREGS, pid, nullptr, &fprs) == 0) {
-      state.x87.fstw = fprs.swd;
-      state.x87.fctw = fprs.cwd;
-      state.x87.ftag = fprs.twd;
-      state.x87.fiseg = fprs.fcs;
-      state.x87.fioff = fprs.fip;
-      state.x87.foseg = fprs.fos;
-      state.x87.fooff = fprs.foo;
-
-      uint8_t const *st_space =
-          reinterpret_cast<uint8_t const *>(fprs.st_space);
-      for (size_t n = 0; n < 8; n++) {
-        memcpy(state.x87.regs[n].bytes, st_space + n * 10,
-               sizeof(state.x87.regs[n].bytes));
-      }
-    }
+  // If this call fails, don't return failure, since AVX may not be available
+  // on this CPU
+  if (wrapPtrace(PTRACE_GETREGSET, pid, NT_X86_XSTATE, &fpregs_iovec) == 0) {
+    user_to_state32(state, xfpregs);
   }
 
   return kSuccess;
@@ -144,85 +148,31 @@ ErrorCode PTrace::writeCPUState(ProcessThreadId const &ptid,
     return error;
 
   //
-  // Initialize the CPU state, just in case.
-  //
-  initCPUState(pid);
-
-  //
-  // Read GPRs
+  // Write GPRs
   //
   user_regs_struct gprs;
-  std::memset(&gprs, 0, sizeof(gprs));
-  gprs.eax = state.gp.eax;
-  gprs.ecx = state.gp.ecx;
-  gprs.edx = state.gp.edx;
-  gprs.ebx = state.gp.ebx;
-  gprs.esi = state.gp.esi;
-  gprs.edi = state.gp.edi;
-  gprs.ebp = state.gp.ebp;
-  gprs.esp = state.gp.esp;
-  gprs.eip = state.gp.eip;
-  gprs.xcs = state.gp.cs & 0xffff;
-  gprs.xss = state.gp.ss & 0xffff;
-  gprs.xds = state.gp.ds & 0xffff;
-  gprs.xes = state.gp.es & 0xffff;
-  gprs.xfs = state.gp.fs & 0xffff;
-  gprs.xgs = state.gp.gs & 0xffff;
-  gprs.eflags = state.gp.eflags;
-  gprs.orig_eax = state.linux_gp.orig_eax;
+  Architecture::X86::state32_to_user(gprs, state);
 
   if (wrapPtrace(PTRACE_SETREGS, pid, nullptr, &gprs) < 0)
     return Platform::TranslateError();
 
   //
-  // Write X87 and SSE state
+  // Write SSE and AVX
   //
-  user_fpxregs_struct fxrs;
+  struct xfpregs_struct xfpregs;
+  struct iovec fpregs_iovec;
+  fpregs_iovec.iov_base = &xfpregs;
+  fpregs_iovec.iov_len = sizeof(xfpregs);
 
-  // X87 State
-  fxrs.swd = state.x87.fstw;
-  fxrs.cwd = state.x87.fctw;
-  fxrs.twd = state.x87.ftag;
-  fxrs.fop = state.x87.fop;
-  fxrs.fcs = state.x87.fiseg;
-  fxrs.fip = state.x87.fioff;
-  fxrs.fos = state.x87.foseg;
-  fxrs.foo = state.x87.fooff;
-
-  uint8_t *st_space = reinterpret_cast<uint8_t *>(fxrs.st_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(st_space + n * 16, state.x87.regs[n].bytes,
-           sizeof(state.x87.regs[n].bytes));
+  // We need this read to fill the kernel header (xfpregs_struct.xstate_hdr)
+  // TODO - add this header to CPUState so we don't need this read
+  if (wrapPtrace(PTRACE_GETREGSET, pid, NT_X86_XSTATE, &fpregs_iovec) < 0) {
+    // If we fail to read the AVX register info, still write the SSE regs
+    fpregs_iovec.iov_len = sizeof(xfpregs.fpregs);
   }
+  state32_to_user(xfpregs, state);
 
-  // SSE state
-  fxrs.mxcsr = state.sse.mxcsr;
-  fxrs.reserved = state.sse.mxcsrmask;
-  uint8_t *xmm_space = reinterpret_cast<uint8_t *>(fxrs.xmm_space);
-  for (size_t n = 0; n < 8; n++) {
-    memcpy(xmm_space + n * 16, &state.sse.regs[n], sizeof(state.sse.regs[n]));
-  }
-
-  if (wrapPtrace(PTRACE_SETFPXREGS, pid, nullptr, &fxrs) < 0) {
-    //
-    // Try writing only X87
-    //
-    user_fpregs_struct fprs;
-    fprs.swd = state.x87.fstw;
-    fprs.cwd = state.x87.fctw;
-    fprs.twd = state.x87.ftag;
-    fprs.fcs = state.x87.fiseg;
-    fprs.fip = state.x87.fioff;
-    fprs.fos = state.x87.foseg;
-    fprs.foo = state.x87.fooff;
-
-    uint8_t *st_space = reinterpret_cast<uint8_t *>(fprs.st_space);
-    for (size_t n = 0; n < 8; n++) {
-      memcpy(st_space + n * 10, state.x87.regs[n].bytes,
-             sizeof(state.x87.regs[n].bytes));
-    }
-    wrapPtrace(PTRACE_SETFPREGS, pid, nullptr, &fprs);
-  }
+  wrapPtrace(PTRACE_SETREGSET, pid, NT_X86_XSTATE, &fpregs_iovec);
 
   return kSuccess;
 }

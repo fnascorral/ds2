@@ -8,7 +8,7 @@
 ## PATENTS file in the same directory.
 ##
 
-cmake_minimum_required(VERSION 3.1.0)
+cmake_minimum_required(VERSION 3.3)
 cmake_policy(SET CMP0054 NEW)
 
 project(DebugServer2)
@@ -38,6 +38,18 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"
   # be set before we include subdirectories.
   if (STATIC)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+  endif ()
+
+  if (SANITIZER)
+    set(COMMON_FLAGS "${COMMON_FLAGS} -g -fno-omit-frame-pointer")
+  endif ()
+
+  if (SANITIZER STREQUAL "asan")
+    set(COMMON_FLAGS "${COMMON_FLAGS} -fsanitize=address")
+  elseif (SANITIZER STREQUAL "ubsan")
+    set(COMMON_FLAGS "${COMMON_FLAGS} -fsanitize=integer -fsanitize=undefined")
+  elseif (SANITIZER STREQUAL "tsan")
+    set(COMMON_FLAGS "${COMMON_FLAGS} -fsanitize=thread")
   endif ()
 
   if (PIE)
@@ -97,14 +109,15 @@ set(ARCHITECTURE_X86_64_SOURCES
 
 set(HOST_COMMON_SOURCES
     Sources/Host/Common/Channel.cpp
+    Sources/Host/Common/Platform.cpp
     Sources/Host/Common/QueueChannel.cpp
     Sources/Host/Common/Socket.cpp
     )
 
 set(HOST_POSIX_SOURCES
+    Sources/Host/POSIX/File.cpp
     Sources/Host/POSIX/Platform.cpp
     Sources/Host/POSIX/PTrace.cpp
-    Sources/Host/POSIX/AsyncProcessWaiter.cpp
     Sources/Host/POSIX/ProcessSpawner.cpp
     )
 
@@ -121,6 +134,8 @@ set(HOST_Darwin_SOURCES
     Sources/Host/Darwin/LibProc.cpp
     Sources/Host/Darwin/Platform.cpp
     Sources/Host/Darwin/PTrace.cpp
+    Sources/Host/Darwin/Mach.cpp
+    Sources/Host/Darwin/${ARCH_NAME}/Mach${ARCH_NAME}.cpp
     Sources/Host/Darwin/${ARCH_NAME}/PTrace${ARCH_NAME}.cpp
     )
 
@@ -133,13 +148,15 @@ set(HOST_FreeBSD_SOURCES
     )
 
 set(HOST_Windows_SOURCES
+    Sources/Host/Windows/File.cpp
     Sources/Host/Windows/Platform.cpp
     Sources/Host/Windows/ProcessSpawner.cpp
     )
 
 set(TARGET_COMMON_SOURCES
-    Sources/Target/ProcessBase.cpp
-    Sources/Target/ThreadBase.cpp
+    Sources/Target/Common/ProcessBase.cpp
+    Sources/Target/Common/${ARCH_NAME}/ProcessBase${ARCH_NAME}.cpp
+    Sources/Target/Common/ThreadBase.cpp
     )
 
 set(TARGET_POSIX_ELF_SOURCES
@@ -154,8 +171,8 @@ set(TARGET_POSIX_SOURCES
 set(TARGET_Linux_SOURCES
     ${TARGET_POSIX_ELF_SOURCES}
     ${TARGET_POSIX_SOURCES}
-    Sources/Target/Linux/${ARCH_NAME}/Process${ARCH_NAME}.cpp
     Sources/Target/Linux/Process.cpp
+    Sources/Target/Linux/${ARCH_NAME}/Process${ARCH_NAME}.cpp
     Sources/Target/Linux/Thread.cpp
     )
 
@@ -164,6 +181,7 @@ set(TARGET_Darwin_SOURCES
     Sources/Target/Darwin/MachOProcess.cpp
     Sources/Target/Darwin/Process.cpp
     Sources/Target/Darwin/${ARCH_NAME}/Process${ARCH_NAME}.cpp
+    Sources/Target/Darwin/${ARCH_NAME}/Thread${ARCH_NAME}.cpp
     Sources/Target/Darwin/Thread.cpp
     )
 
@@ -171,16 +189,14 @@ set(TARGET_FreeBSD_SOURCES
     ${TARGET_POSIX_ELF_SOURCES}
     ${TARGET_POSIX_SOURCES}
     Sources/Target/FreeBSD/Process.cpp
-    Sources/Target/FreeBSD/${ARCH_NAME}/Thread${ARCH_NAME}.cpp
     Sources/Target/FreeBSD/${ARCH_NAME}/Process${ARCH_NAME}.cpp
     Sources/Target/FreeBSD/Thread.cpp
     )
 
 set(TARGET_Windows_SOURCES
-    Sources/Target/Windows/${ARCH_NAME}/Process${ARCH_NAME}.cpp
-    Sources/Target/Windows/${ARCH_NAME}/Thread${ARCH_NAME}.cpp
     Sources/Target/Windows/Process.cpp
     Sources/Target/Windows/Thread.cpp
+    Sources/Target/Windows/${ARCH_NAME}/Thread${ARCH_NAME}.cpp
     )
 
 set(GDB_SOURCES
@@ -188,18 +204,15 @@ set(GDB_SOURCES
     )
 
 set(GDBREMOTE_SOURCES
-    Sources/GDBRemote/Structures.cpp
-    Sources/GDBRemote/PacketProcessor.cpp
-    Sources/GDBRemote/ProtocolInterpreter.cpp
-    Sources/GDBRemote/ProtocolHelpers.cpp
-
-    Sources/GDBRemote/SessionBase.cpp
-    Sources/GDBRemote/Session.cpp
-
-    Sources/GDBRemote/DummySessionDelegateImpl.cpp
-    Sources/GDBRemote/PlatformSessionImpl.cpp
     Sources/GDBRemote/DebugSessionImpl.cpp
+    Sources/GDBRemote/DummySessionDelegateImpl.cpp
+    Sources/GDBRemote/PacketProcessor.cpp
+    Sources/GDBRemote/PlatformSessionImpl.cpp
+    Sources/GDBRemote/ProtocolInterpreter.cpp
+    Sources/GDBRemote/Session.cpp
+    Sources/GDBRemote/SessionBase.cpp
     Sources/GDBRemote/SlaveSessionImpl.cpp
+    Sources/GDBRemote/Structures.cpp
     )
 
 set(SUPPORT_COMMON_SOURCES
@@ -208,11 +221,11 @@ set(SUPPORT_COMMON_SOURCES
     Sources/ErrorCodes.cpp
     Sources/MessageQueue.cpp
     Sources/SessionThread.cpp
-    Sources/Support/Stringify.cpp
     Sources/Utils/Backtrace.cpp
     Sources/Utils/Log.cpp
     Sources/Utils/OptParse.cpp
     Sources/Utils/Paths.cpp
+    Sources/Utils/Stringify.cpp
     Sources/main.cpp
     )
 
@@ -221,8 +234,8 @@ set(SUPPORT_POSIX_ELF_SOURCES
     )
 
 set(SUPPORT_POSIX_SOURCES
-    Sources/Support/POSIX/FaultHandler.cpp
-    Sources/Support/POSIX/Stringify.cpp
+    Sources/Utils/POSIX/FaultHandler.cpp
+    Sources/Utils/POSIX/Stringify.cpp
     )
 
 set(SUPPORT_Linux_SOURCES
@@ -240,7 +253,8 @@ set(SUPPORT_FreeBSD_SOURCES
     )
 
 set(SUPPORT_Windows_SOURCES
-    Sources/Support/Windows/Stringify.cpp
+    Sources/Utils/Windows/FaultHandler.cpp
+    Sources/Utils/Windows/Stringify.cpp
     )
 
 set(HOST_SOURCES ${HOST_COMMON_SOURCES} ${HOST_${OS_NAME}_SOURCES})
@@ -264,11 +278,27 @@ else ()
 endif ()
 target_include_directories(ds2 PUBLIC Headers)
 set_property(TARGET ds2 PROPERTY CXX_STANDARD 11)
+set_property(TARGET ds2 PROPERTY CXX_EXTENSIONS OFF)
 set_property(TARGET ds2 PROPERTY CXX_STANDARD_REQUIRED ON)
 
 if ("${OS_NAME}" MATCHES "Windows")
   target_compile_definitions(ds2 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX CINTERFACE)
-  target_compile_definitions(ds2 PRIVATE WINVER=_WIN32_WINNT_WIN6 _WIN32_WINNT=_WIN32_WINNT_WIN6)
+  target_compile_definitions(ds2 PRIVATE WINVER=_WIN32_WINNT_WIN6
+                                         _WIN32_WINNT=_WIN32_WINNT_WIN6)
+endif ()
+
+if ("${OS_NAME}" MATCHES "Linux")
+  include(CheckIncludeFile)
+  CHECK_INCLUDE_FILE(sys/personality.h HAVE_SYS_PERSONALITY_H)
+  if (HAVE_SYS_PERSONALITY_H)
+    target_compile_definitions(ds2 PRIVATE HAVE_SYS_PERSONALITY_H)
+  endif ()
+
+  include(CheckFunctionExists)
+  CHECK_FUNCTION_EXISTS(posix_openpt HAVE_POSIX_OPENPT)
+  if (HAVE_POSIX_OPENPT)
+    target_compile_definitions(ds2 PRIVATE HAVE_POSIX_OPENPT)
+  endif ()
 endif ()
 
 if (TIZEN)
@@ -278,18 +308,27 @@ endif ()
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   target_compile_options(ds2 PRIVATE -Wall -Wextra -Wno-unused-parameter)
   if ("${OS_NAME}" MATCHES "Windows")
-    target_compile_options(ds2 PRIVATE -Wno-missing-braces -Wno-missing-field-initializers -Wno-tautological-compare)
-  elseif ("${OS_NAME}" MATCHES "Darwin")
-    # We need this because we use PT_ATTACH instead of PT_ATTACHEXEC on Darwin.
-    target_compile_options(ds2 PRIVATE -Wno-deprecated-declarations)
+    target_compile_options(ds2 PRIVATE -Wno-missing-braces
+                                       -Wno-missing-field-initializers
+                                       -Wno-tautological-compare)
   endif ()
 
-  if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" AND NOT "${CMAKE_CXX_COMPILER_VERSION}" VERSION_LESS "5.1")
-    target_compile_options(ds2 PRIVATE -Wsuggest-override)
+  # `-Wunused-but-set-parameter` seems to be buggy in gcc 6.0+ when dealing
+  # with `nullptr_t`.
+  if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU" AND
+      NOT "${CMAKE_CXX_COMPILER_VERSION}" VERSION_LESS "6.0")
+    target_compile_options(ds2 PRIVATE -Wno-unused-but-set-parameter)
   endif ()
-#  if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
-#    target_compile_options(ds2 PRIVATE -Winconsistent-missing-override)
-#  endif ()
+  if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU" AND
+      NOT "${CMAKE_CXX_COMPILER_VERSION}" VERSION_LESS "5.1")
+    target_compile_options(
+        ds2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wsuggest-override>)
+  endif ()
+  if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" AND
+      NOT "${CMAKE_CXX_COMPILER_VERSION}" VERSION_LESS "3.5")
+    target_compile_options(
+        ds2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Winconsistent-missing-override>)
+  endif ()
 elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
   target_compile_options(ds2 PRIVATE /W3 /DSTRICT /wd4244 /wd4996)
   target_compile_options(ds2 PRIVATE /MP)
@@ -322,15 +361,14 @@ endif ()
 if (COVERAGE)
   if (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     target_link_libraries(ds2 gcov)
-  elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_link_libraries(ds2 profiler_rt)
   endif ()
 endif ()
 
 include(FindThreads)
 if (STATIC AND DEFINED CMAKE_THREAD_LIBS_INIT AND
     (CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
-  target_link_libraries(ds2 -Wl,--whole-archive ${CMAKE_THREAD_LIBS_INIT} -Wl,--no-whole-archive)
+  target_link_libraries(ds2 -Wl,--whole-archive ${CMAKE_THREAD_LIBS_INIT}
+                            -Wl,--no-whole-archive)
 else ()
   target_link_libraries(ds2 ${CMAKE_THREAD_LIBS_INIT})
 endif ()

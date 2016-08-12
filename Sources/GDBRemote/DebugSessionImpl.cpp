@@ -15,30 +15,30 @@
 #include "DebugServer2/HardwareBreakpointManager.h"
 #include "DebugServer2/Host/Platform.h"
 #include "DebugServer2/SoftwareBreakpointManager.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Utils/HexValues.h"
 #include "DebugServer2/Utils/Log.h"
 #include "DebugServer2/Utils/Paths.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <iomanip>
 #include <sstream>
 
 using ds2::Host::Platform;
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
 using ds2::Target::Thread;
 
 namespace ds2 {
 namespace GDBRemote {
 
-DebugSessionImpl::DebugSessionImpl(StringCollection const &args,
-                                   EnvironmentBlock const &env)
+DebugSessionImplBase::DebugSessionImplBase(StringCollection const &args,
+                                           EnvironmentBlock const &env)
     : DummySessionDelegateImpl(), _resumeSession(nullptr) {
   DS2ASSERT(args.size() >= 1);
   _resumeSessionLock.lock();
   spawnProcess(args, env);
 }
 
-DebugSessionImpl::DebugSessionImpl(int attachPid)
+DebugSessionImplBase::DebugSessionImplBase(int attachPid)
     : DummySessionDelegateImpl(), _resumeSession(nullptr) {
   _resumeSessionLock.lock();
   _process = ds2::Target::Process::Attach(attachPid);
@@ -46,17 +46,17 @@ DebugSessionImpl::DebugSessionImpl(int attachPid)
     DS2LOG(Fatal, "cannot attach to pid %d", attachPid);
 }
 
-DebugSessionImpl::DebugSessionImpl()
+DebugSessionImplBase::DebugSessionImplBase()
     : DummySessionDelegateImpl(), _process(nullptr), _resumeSession(nullptr) {
   _resumeSessionLock.lock();
 }
 
-DebugSessionImpl::~DebugSessionImpl() {
+DebugSessionImplBase::~DebugSessionImplBase() {
   _resumeSessionLock.unlock();
   delete _process;
 }
 
-size_t DebugSessionImpl::getGPRSize() const {
+size_t DebugSessionImplBase::getGPRSize() const {
   if (_process == nullptr)
     return 0;
 
@@ -67,14 +67,13 @@ size_t DebugSessionImpl::getGPRSize() const {
   return info.pointerSize << 3;
 }
 
-ErrorCode DebugSessionImpl::onInterrupt(Session &) {
+ErrorCode DebugSessionImplBase::onInterrupt(Session &) {
   return _process->interrupt();
 }
 
-ErrorCode
-DebugSessionImpl::onQuerySupported(Session &session,
-                                   Feature::Collection const &remoteFeatures,
-                                   Feature::Collection &localFeatures) const {
+ErrorCode DebugSessionImplBase::onQuerySupported(
+    Session &session, Feature::Collection const &remoteFeatures,
+    Feature::Collection &localFeatures) const {
   for (auto feature : remoteFeatures) {
     DS2LOG(Debug, "gdb feature: %s", feature.name.c_str());
   }
@@ -121,33 +120,42 @@ DebugSessionImpl::onQuerySupported(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onPassSignals(Session &session,
-                                          std::vector<int> const &signals) {
+ErrorCode DebugSessionImplBase::onPassSignals(Session &session,
+                                              std::vector<int> const &signals) {
+#if defined(OS_POSIX)
   _process->resetSignalPass();
   for (int signo : signals) {
     DS2LOG(Debug, "passing signal %d", signo);
     _process->setSignalPass(signo, true);
   }
   return kSuccess;
+#else
+  return kErrorUnsupported;
+#endif
 }
 
-ErrorCode DebugSessionImpl::onProgramSignals(Session &session,
-                                             std::vector<int> const &signals) {
+ErrorCode
+DebugSessionImplBase::onProgramSignals(Session &session,
+                                       std::vector<int> const &signals) {
+#if defined(OS_POSIX)
   for (int signo : signals) {
     DS2LOG(Debug, "programming signal %d", signo);
     _process->setSignalPass(signo, false);
   }
   return kSuccess;
+#else
+  return kErrorUnsupported;
+#endif
 }
 
-ErrorCode DebugSessionImpl::onNonStopMode(Session &session, bool enable) {
+ErrorCode DebugSessionImplBase::onNonStopMode(Session &session, bool enable) {
   if (enable)
     return kErrorUnsupported; // TODO support non-stop mode
 
   return kSuccess;
 }
 
-Thread *DebugSessionImpl::findThread(ProcessThreadId const &ptid) const {
+Thread *DebugSessionImplBase::findThread(ProcessThreadId const &ptid) const {
   if (_process == nullptr)
     return nullptr;
 
@@ -164,23 +172,9 @@ Thread *DebugSessionImpl::findThread(ProcessThreadId const &ptid) const {
   return thread;
 }
 
-ErrorCode DebugSessionImpl::queryStopCode(Session &session,
-                                          ProcessThreadId const &ptid,
-                                          StopInfo &stop) const {
-  Thread *thread = findThread(ptid);
-  DS2LOG(Debug, "thread %p", thread);
-
-  if (thread == nullptr) {
-#if defined(OS_WIN32)
-    // TODO: This needs to go away.
-    if (_process && !_process->isAlive()) {
-      stop.event = StopInfo::kEventKill;
-      stop.signal = 9;
-      return kSuccess;
-    }
-#endif
-    return kErrorProcessNotFound;
-  }
+ErrorCode DebugSessionImplBase::queryStopInfo(Session &session, Thread *thread,
+                                              StopInfo &stop) const {
+  DS2ASSERT(thread != nullptr);
 
   // Directly copy the fields that are common between ds2::StopInfo and
   // ds2::GDBRemote::StopInfo.
@@ -211,16 +205,21 @@ ErrorCode DebugSessionImpl::queryStopCode(Session &session,
   } break;
 
   case StopInfo::kEventExit:
-#if !defined(OS_WIN32)
-  // We can't get kEventKill in StopInfo::event on Windows unless we emulate it
-  // (see top of this function).
   case StopInfo::kEventKill:
-#endif
     DS2ASSERT(stop.reason == StopInfo::kReasonNone);
     break;
 
   default:
     DS2BUG("impossible StopInfo event: %s", Stringify::StopEvent(stop.event));
+  }
+
+  HardwareBreakpointManager *hwBpm = _process->hardwareBreakpointManager();
+  if (hwBpm) {
+    BreakpointManager::Site site;
+    stop.watchpointIndex = hwBpm->hit(thread, site);
+    if (stop.watchpointIndex >= 0) {
+      stop.watchpointAddress = site.address;
+    }
   }
 
   _process->enumerateThreads(
@@ -229,19 +228,29 @@ ErrorCode DebugSessionImpl::queryStopCode(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onQueryThreadStopInfo(Session &session,
-                                                  ProcessThreadId const &ptid,
-                                                  StopInfo &stop) const {
+ErrorCode DebugSessionImplBase::queryStopInfo(Session &session,
+                                              ProcessThreadId const &ptid,
+                                              StopInfo &stop) const {
+  Thread *thread = findThread(ptid);
+  if (thread == nullptr) {
+    return kErrorInvalidArgument;
+  }
+
+  return queryStopInfo(session, thread, stop);
+}
+
+ErrorCode DebugSessionImplBase::onQueryThreadStopInfo(
+    Session &session, ProcessThreadId const &ptid, StopInfo &stop) const {
   Thread *thread = findThread(ptid);
   if (thread == nullptr)
     return kErrorProcessNotFound;
 
-  return queryStopCode(session, ptid, stop);
+  return queryStopInfo(session, ptid, stop);
 }
 
-ErrorCode DebugSessionImpl::onQueryThreadList(Session &, ProcessId pid,
-                                              ThreadId lastTid,
-                                              ThreadId &tid) const {
+ErrorCode DebugSessionImplBase::onQueryThreadList(Session &, ProcessId pid,
+                                                  ThreadId lastTid,
+                                                  ThreadId &tid) const {
   if (_process == nullptr)
     return kErrorProcessNotFound;
 
@@ -262,8 +271,9 @@ ErrorCode DebugSessionImpl::onQueryThreadList(Session &, ProcessId pid,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onQueryCurrentThread(Session &,
-                                                 ProcessThreadId &ptid) const {
+ErrorCode
+DebugSessionImplBase::onQueryCurrentThread(Session &,
+                                           ProcessThreadId &ptid) const {
   if (_process == nullptr)
     return kErrorProcessNotFound;
 
@@ -276,8 +286,8 @@ ErrorCode DebugSessionImpl::onQueryCurrentThread(Session &,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onThreadIsAlive(Session &session,
-                                            ProcessThreadId const &ptid) {
+ErrorCode DebugSessionImplBase::onThreadIsAlive(Session &session,
+                                                ProcessThreadId const &ptid) {
   if (_process == nullptr)
     return kErrorProcessNotFound;
 
@@ -291,8 +301,8 @@ ErrorCode DebugSessionImpl::onThreadIsAlive(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onQueryAttached(Session &, ProcessId pid,
-                                            bool &attachedProcess) const {
+ErrorCode DebugSessionImplBase::onQueryAttached(Session &, ProcessId pid,
+                                                bool &attachedProcess) const {
   if (_process == nullptr)
     return kErrorProcessNotFound;
   if (pid != kAnyProcessId && pid != kAllProcessId && pid != _process->pid())
@@ -302,8 +312,8 @@ ErrorCode DebugSessionImpl::onQueryAttached(Session &, ProcessId pid,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onQueryProcessInfo(Session &,
-                                               ProcessInfo &info) const {
+ErrorCode DebugSessionImplBase::onQueryProcessInfo(Session &,
+                                                   ProcessInfo &info) const {
   if (_process == nullptr)
     return kErrorProcessNotFound;
   else
@@ -311,8 +321,8 @@ ErrorCode DebugSessionImpl::onQueryProcessInfo(Session &,
 }
 
 ErrorCode
-DebugSessionImpl::onQueryHardwareWatchpointCount(Session &,
-                                                 size_t &count) const {
+DebugSessionImplBase::onQueryHardwareWatchpointCount(Session &,
+                                                     size_t &count) const {
   if (_process == nullptr) {
     return kErrorProcessNotFound;
   }
@@ -327,8 +337,8 @@ DebugSessionImpl::onQueryHardwareWatchpointCount(Session &,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onQueryRegisterInfo(Session &, uint32_t regno,
-                                                RegisterInfo &info) const {
+ErrorCode DebugSessionImplBase::onQueryRegisterInfo(Session &, uint32_t regno,
+                                                    RegisterInfo &info) const {
   Architecture::LLDBRegisterInfo reginfo;
   Architecture::LLDBDescriptor const *desc =
       _process->getLLDBRegistersDescriptor();
@@ -425,16 +435,16 @@ ErrorCode DebugSessionImpl::onQueryRegisterInfo(Session &, uint32_t regno,
     }
   }
 
+  info.containerRegisters.clear();
   if (reginfo.Def->ContainerRegisters != nullptr) {
-    info.containerRegisters.clear();
     for (size_t n = 0; reginfo.Def->ContainerRegisters[n] != nullptr; n++) {
       info.containerRegisters.push_back(
           reginfo.Def->ContainerRegisters[n]->LLDBRegisterNumber);
     }
   }
 
+  info.invalidateRegisters.clear();
   if (reginfo.Def->InvalidatedRegisters != nullptr) {
-    info.invalidateRegisters.clear();
     for (size_t n = 0; reginfo.Def->InvalidatedRegisters[n] != nullptr; n++) {
       info.invalidateRegisters.push_back(
           reginfo.Def->InvalidatedRegisters[n]->LLDBRegisterNumber);
@@ -444,20 +454,44 @@ ErrorCode DebugSessionImpl::onQueryRegisterInfo(Session &, uint32_t regno,
   return kSuccess;
 }
 
-ErrorCode
-DebugSessionImpl::onQuerySharedLibrariesInfoAddress(Session &,
-                                                    Address &address) const {
-  if (_process == nullptr)
+ErrorCode DebugSessionImplBase::onQuerySharedLibrariesInfoAddress(
+    Session &, Address &address) const {
+  if (_process == nullptr) {
     return kErrorProcessNotFound;
+  }
 
+#if defined(OS_POSIX)
   return _process->getSharedLibraryInfoAddress(address);
+#else
+  return kErrorUnsupported;
+#endif
 }
 
-ErrorCode DebugSessionImpl::onXferRead(Session &session,
-                                       std::string const &object,
-                                       std::string const &annex,
-                                       uint64_t offset, uint64_t length,
-                                       std::string &buffer, bool &last) {
+ErrorCode DebugSessionImplBase::onQueryFileLoadAddress(
+    Session &session, std::string const &file_path, Address &address) {
+  if (_process == nullptr) {
+    return kErrorProcessNotFound;
+  }
+
+  ErrorCode error =
+      _process->enumerateMappedFiles([&](MappedFileInfo const &file) {
+        if (file.path == file_path ||
+            ds2::Utils::Basename(file.path) == file_path) {
+          address = Address(file.baseAddress);
+        }
+      });
+  CHK(error);
+  if (!address.valid()) {
+    return kErrorNotFound;
+  }
+  return kSuccess;
+}
+
+ErrorCode DebugSessionImplBase::onXferRead(Session &session,
+                                           std::string const &object,
+                                           std::string const &annex,
+                                           uint64_t offset, uint64_t length,
+                                           std::string &buffer, bool &last) {
   DS2LOG(Debug, "object='%s' annex='%s' offset=%#" PRIx64 " length=%#" PRIx64,
          object.c_str(), annex.c_str(), offset, length);
 
@@ -546,33 +580,31 @@ ErrorCode DebugSessionImpl::onXferRead(Session &session,
     std::ostringstream sslibs;
     Address mainMapAddress;
 
-    if (_process->isELFProcess()) {
-      _process->enumerateSharedLibraries([&](SharedLibraryInfo const &library) {
-        if (library.main) {
-          mainMapAddress = library.svr4.mapAddress;
-        } else {
-          sslibs << "<library "
-                 << "name=\"" << ds2::Utils::Basename(library.path) << "\" "
-                 << "lm=\""
-                 << "0x" << std::hex << library.svr4.mapAddress << "\" "
-                 << "l_addr=\""
-                 << "0x" << std::hex << library.svr4.baseAddress << "\" "
-                 << "l_ld=\""
-                 << "0x" << std::hex << library.svr4.ldAddress << "\" "
-                 << "/>" << std::endl;
-        }
-      });
-
-      ss << "<library-list-svr4 version=\"1.0\"";
-      if (mainMapAddress.valid()) {
-        ss << " main-lm=\""
-           << "0x" << std::hex << mainMapAddress.value() << "\"";
+    _process->enumerateSharedLibraries([&](SharedLibraryInfo const &library) {
+      if (library.main) {
+        mainMapAddress = library.svr4.mapAddress;
+      } else {
+        sslibs << "<library "
+               << "name=\"" << library.path << "\" "
+               << "lm=\""
+               << "0x" << std::hex << library.svr4.mapAddress << "\" "
+               << "l_addr=\""
+               << "0x" << std::hex << library.svr4.baseAddress << "\" "
+               << "l_ld=\""
+               << "0x" << std::hex << library.svr4.ldAddress << "\" "
+               << "/>" << std::endl;
       }
-      ss << ">" << std::endl;
-      ss << sslibs.str();
-      ss << "</library-list-svr4>";
-      buffer = ss.str().substr(offset);
+    });
+
+    ss << "<library-list-svr4 version=\"1.0\"";
+    if (mainMapAddress.valid()) {
+      ss << " main-lm=\""
+         << "0x" << std::hex << mainMapAddress.value() << "\"";
     }
+    ss << ">" << std::endl;
+    ss << sslibs.str();
+    ss << "</library-list-svr4>";
+    buffer = ss.str().substr(offset);
   } else {
     return kErrorUnsupported;
   }
@@ -585,17 +617,16 @@ ErrorCode DebugSessionImpl::onXferRead(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onSetEnvironmentVariable(Session &,
-                                                     std::string const &key,
-                                                     std::string const &value) {
+ErrorCode DebugSessionImplBase::onSetEnvironmentVariable(
+    Session &, std::string const &key, std::string const &value) {
   if (!_spawner.addEnvironment(key, value))
     return kErrorInvalidArgument;
 
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onSetStdFile(Session &, int fileno,
-                                         std::string const &path) {
+ErrorCode DebugSessionImplBase::onSetStdFile(Session &, int fileno,
+                                             std::string const &path) {
   bool success = false;
   switch (fileno) {
   case 0:
@@ -617,7 +648,7 @@ ErrorCode DebugSessionImpl::onSetStdFile(Session &, int fileno,
   return kErrorInvalidArgument;
 }
 
-ErrorCode DebugSessionImpl::onReadGeneralRegisters(
+ErrorCode DebugSessionImplBase::onReadGeneralRegisters(
     Session &, ProcessThreadId const &ptid,
     Architecture::GPRegisterValueVector &regs) {
   Thread *thread = findThread(ptid);
@@ -634,7 +665,7 @@ ErrorCode DebugSessionImpl::onReadGeneralRegisters(
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onWriteGeneralRegisters(
+ErrorCode DebugSessionImplBase::onWriteGeneralRegisters(
     Session &, ProcessThreadId const &ptid, std::vector<uint64_t> const &regs) {
   Thread *thread = findThread(ptid);
   if (thread == nullptr)
@@ -650,9 +681,9 @@ ErrorCode DebugSessionImpl::onWriteGeneralRegisters(
   return thread->writeCPUState(state);
 }
 
-ErrorCode DebugSessionImpl::onSaveRegisters(Session &session,
-                                            ProcessThreadId const &ptid,
-                                            uint64_t &id) {
+ErrorCode DebugSessionImplBase::onSaveRegisters(Session &session,
+                                                ProcessThreadId const &ptid,
+                                                uint64_t &id) {
   static uint64_t counter = 1;
 
   Thread *thread = findThread(ptid);
@@ -669,9 +700,9 @@ ErrorCode DebugSessionImpl::onSaveRegisters(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onRestoreRegisters(Session &session,
-                                               ProcessThreadId const &ptid,
-                                               uint64_t id) {
+ErrorCode DebugSessionImplBase::onRestoreRegisters(Session &session,
+                                                   ProcessThreadId const &ptid,
+                                                   uint64_t id) {
   Thread *thread = findThread(ptid);
   if (thread == nullptr)
     return kErrorProcessNotFound;
@@ -689,10 +720,10 @@ ErrorCode DebugSessionImpl::onRestoreRegisters(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onReadRegisterValue(Session &session,
-                                                ProcessThreadId const &ptid,
-                                                uint32_t regno,
-                                                std::string &value) {
+ErrorCode DebugSessionImplBase::onReadRegisterValue(Session &session,
+                                                    ProcessThreadId const &ptid,
+                                                    uint32_t regno,
+                                                    std::string &value) {
   Thread *thread = findThread(ptid);
   if (thread == nullptr)
     return kErrorProcessNotFound;
@@ -721,10 +752,9 @@ ErrorCode DebugSessionImpl::onReadRegisterValue(Session &session,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onWriteRegisterValue(Session &session,
-                                                 ProcessThreadId const &ptid,
-                                                 uint32_t regno,
-                                                 std::string const &value) {
+ErrorCode DebugSessionImplBase::onWriteRegisterValue(
+    Session &session, ProcessThreadId const &ptid, uint32_t regno,
+    std::string const &value) {
   Thread *thread = findThread(ptid);
   if (thread == nullptr)
     return kErrorProcessNotFound;
@@ -755,26 +785,26 @@ ErrorCode DebugSessionImpl::onWriteRegisterValue(Session &session,
   return thread->writeCPUState(state);
 }
 
-ErrorCode DebugSessionImpl::onReadMemory(Session &, Address const &address,
-                                         size_t length, std::string &data) {
+ErrorCode DebugSessionImplBase::onReadMemory(Session &, Address const &address,
+                                             size_t length, ByteVector &data) {
   if (_process == nullptr)
     return kErrorProcessNotFound;
   else
     return _process->readMemoryBuffer(address, length, data);
 }
 
-ErrorCode DebugSessionImpl::onWriteMemory(Session &, Address const &address,
-                                          std::string const &data,
-                                          size_t &nwritten) {
+ErrorCode DebugSessionImplBase::onWriteMemory(Session &, Address const &address,
+                                              ByteVector const &data,
+                                              size_t &nwritten) {
   if (_process == nullptr)
     return kErrorProcessNotFound;
   else
     return _process->writeMemoryBuffer(address, data, &nwritten);
 }
 
-ErrorCode DebugSessionImpl::onAllocateMemory(Session &, size_t size,
-                                             uint32_t permissions,
-                                             Address &address) {
+ErrorCode DebugSessionImplBase::onAllocateMemory(Session &, size_t size,
+                                                 uint32_t permissions,
+                                                 Address &address) {
   uint64_t addr;
   ErrorCode error = _process->allocateMemory(size, permissions, &addr);
   if (error == kSuccess) {
@@ -784,8 +814,8 @@ ErrorCode DebugSessionImpl::onAllocateMemory(Session &, size_t size,
   return error;
 }
 
-ErrorCode DebugSessionImpl::onDeallocateMemory(Session &,
-                                               Address const &address) {
+ErrorCode DebugSessionImplBase::onDeallocateMemory(Session &,
+                                                   Address const &address) {
   auto i = _allocations.find(address);
   if (i == _allocations.end())
     return kErrorInvalidArgument;
@@ -799,8 +829,8 @@ ErrorCode DebugSessionImpl::onDeallocateMemory(Session &,
 }
 
 ErrorCode
-DebugSessionImpl::onQueryMemoryRegionInfo(Session &, Address const &address,
-                                          MemoryRegionInfo &info) const {
+DebugSessionImplBase::onQueryMemoryRegionInfo(Session &, Address const &address,
+                                              MemoryRegionInfo &info) const {
   if (_process == nullptr)
     return kErrorProcessNotFound;
   else
@@ -808,8 +838,8 @@ DebugSessionImpl::onQueryMemoryRegionInfo(Session &, Address const &address,
 }
 
 ErrorCode
-DebugSessionImpl::onSetProgramArguments(Session &,
-                                        StringCollection const &args) {
+DebugSessionImplBase::onSetProgramArguments(Session &,
+                                            StringCollection const &args) {
   spawnProcess(args, {});
   if (_process == nullptr)
     return kErrorUnknown;
@@ -817,12 +847,13 @@ DebugSessionImpl::onSetProgramArguments(Session &,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onQueryLaunchSuccess(Session &, ProcessId) const {
+ErrorCode DebugSessionImplBase::onQueryLaunchSuccess(Session &,
+                                                     ProcessId) const {
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::onAttach(Session &session, ProcessId pid,
-                                     AttachMode mode, StopInfo &stop) {
+ErrorCode DebugSessionImplBase::onAttach(Session &session, ProcessId pid,
+                                         AttachMode mode, StopInfo &stop) {
   if (_process != nullptr)
     return kErrorAlreadyExist;
 
@@ -831,17 +862,17 @@ ErrorCode DebugSessionImpl::onAttach(Session &session, ProcessId pid,
 
   DS2LOG(Info, "attaching to pid %" PRIu64, (uint64_t)pid);
   _process = Target::Process::Attach(pid);
-  DS2LOG(Debug, "_process=%p", _process);
-  if (_process == nullptr)
+  if (_process == nullptr) {
     return kErrorProcessNotFound;
+  }
 
-  return queryStopCode(session, pid, stop);
+  return queryStopInfo(session, pid, stop);
 }
 
 ErrorCode
-DebugSessionImpl::onResume(Session &session,
-                           ThreadResumeAction::Collection const &actions,
-                           StopInfo &stop) {
+DebugSessionImplBase::onResume(Session &session,
+                               ThreadResumeAction::Collection const &actions,
+                               StopInfo &stop) {
   ErrorCode error;
   ThreadResumeAction globalAction;
   bool hasGlobalAction = false;
@@ -942,28 +973,61 @@ DebugSessionImpl::onResume(Session &session,
     }
   }
 
-  //
   // If kErrorAlreadyExist is set, then a signal is already pending.
-  //
   if (error != kErrorAlreadyExist) {
-    //
-    // Wait for the next signal
-    //
-    error = _process->wait();
-    if (error != kSuccess)
-      goto ret;
+    bool keepGoing = true;
+    while (keepGoing) {
+      error = _process->wait();
+      if (error != kSuccess) {
+        goto ret;
+      }
+
+      auto thread = _process->currentThread();
+      if (thread == nullptr) {
+        break;
+      }
+
+      if (thread->stopInfo().event != StopInfo::kEventStop) {
+        break;
+      }
+
+      switch (thread->stopInfo().reason) {
+#if defined(OS_WIN32)
+      case StopInfo::kReasonDebugOutput: {
+        appendOutput(thread->stopInfo().debugString.c_str(),
+                     thread->stopInfo().debugString.size());
+        error = _process->resume();
+        if (error != kSuccess) {
+          return error;
+        }
+      } break;
+#endif
+
+      case StopInfo::kReasonThreadEntry:
+        error = _process->currentThread()->resume();
+        if (error != kSuccess) {
+          return error;
+        }
+        break;
+
+      default:
+        keepGoing = false;
+        break;
+      }
+    }
   }
 
   error = _process->afterResume();
-  if (error != kSuccess)
+  if (error != kSuccess) {
     goto ret;
+  }
 
-  error = queryStopCode(
-      session,
-      ProcessThreadId(_process->pid(), _process->currentThread()->tid()), stop);
+  error = queryStopInfo(session, _process->currentThread(), stop);
 
-  if (stop.event == StopInfo::kEventExit || stop.event == StopInfo::kEventKill)
+  if (stop.event == StopInfo::kEventExit ||
+      stop.event == StopInfo::kEventKill) {
     _spawner.flushAndExit();
+  }
 
 ret:
   _resumeSessionLock.lock();
@@ -971,7 +1035,7 @@ ret:
   return error;
 }
 
-ErrorCode DebugSessionImpl::onDetach(Session &, ProcessId, bool stopped) {
+ErrorCode DebugSessionImplBase::onDetach(Session &, ProcessId, bool stopped) {
   ErrorCode error;
 
   SoftwareBreakpointManager *bpm = _process->softwareBreakpointManager();
@@ -988,9 +1052,9 @@ ErrorCode DebugSessionImpl::onDetach(Session &, ProcessId, bool stopped) {
   return _process->detach();
 }
 
-ErrorCode DebugSessionImpl::onTerminate(Session &session,
-                                        ProcessThreadId const &ptid,
-                                        StopInfo &stop) {
+ErrorCode DebugSessionImplBase::onTerminate(Session &session,
+                                            ProcessThreadId const &ptid,
+                                            StopInfo &stop) {
   ErrorCode error;
 
   error = _process->terminate();
@@ -1005,13 +1069,27 @@ ErrorCode DebugSessionImpl::onTerminate(Session &session,
     return error;
   }
 
-  return queryStopCode(session, _process->pid(), stop);
+  return queryStopInfo(session, _process->currentThread(), stop);
+}
+
+ErrorCode DebugSessionImplBase::onExitServer(Session &session) {
+  ErrorCode error = kSuccess;
+  ProcessId pid = kAnyProcessId;
+  StopInfo stop;
+
+  if (_process != nullptr) {
+    error = _process->attached() ? onDetach(session, pid, false)
+                                 : onTerminate(session, pid, stop);
+  }
+
+  DS2LOG(Debug, "exiting ds2");
+  exit((error == kSuccess) ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
 // For LLDB we need to support breakpoints through the breakpoint manager
 // because LLDB is unable to handle software breakpoints. In GDB mode we let
 // GDB handle the breakpoints.
-ErrorCode DebugSessionImpl::onInsertBreakpoint(
+ErrorCode DebugSessionImplBase::onInsertBreakpoint(
     Session &session, BreakpointType type, Address const &address,
     uint32_t size, StringCollection const &conditions,
     StringCollection const &commands, bool persistentCommands) {
@@ -1056,10 +1134,10 @@ ErrorCode DebugSessionImpl::onInsertBreakpoint(
   return bpm->add(address, BreakpointManager::kTypePermanent, size, mode);
 }
 
-ErrorCode DebugSessionImpl::onRemoveBreakpoint(Session &session,
-                                               BreakpointType type,
-                                               Address const &address,
-                                               uint32_t size) {
+ErrorCode DebugSessionImplBase::onRemoveBreakpoint(Session &session,
+                                                   BreakpointType type,
+                                                   Address const &address,
+                                                   uint32_t size) {
   BreakpointManager *bpm = nullptr;
   switch (type) {
   case kSoftwareBreakpoint:
@@ -1083,8 +1161,8 @@ ErrorCode DebugSessionImpl::onRemoveBreakpoint(Session &session,
   return bpm->remove(address);
 }
 
-ErrorCode DebugSessionImpl::spawnProcess(StringCollection const &args,
-                                         EnvironmentBlock const &env) {
+ErrorCode DebugSessionImplBase::spawnProcess(StringCollection const &args,
+                                             EnvironmentBlock const &env) {
   if (GetLogLevel() >= kLogLevelInfo) {
     DS2LOG(Info, "spawning process `%s`", args[0].c_str());
   } else {
@@ -1105,21 +1183,10 @@ ErrorCode DebugSessionImpl::spawnProcess(StringCollection const &args,
   }
 
   auto outputDelegate = [this](void *buf, size_t size) {
-    const char *cbuf = static_cast<char *>(buf);
-    for (size_t i = 0; i < size; ++i) {
-      this->_consoleBuffer += cbuf[i];
-      if (cbuf[i] == '\n') {
-        _resumeSessionLock.lock();
-        DS2ASSERT(_resumeSession != nullptr);
-        std::string data = "O";
-        data += StringToHex(this->_consoleBuffer);
-        _consoleBuffer.clear();
-        this->_resumeSession->send(data);
-        _resumeSessionLock.unlock();
-      }
-    }
+    appendOutput(static_cast<char *>(buf), size);
   };
 
+  _spawner.redirectInputToTerminal();
   _spawner.redirectOutputToDelegate(outputDelegate);
   _spawner.redirectErrorToDelegate(outputDelegate);
 
@@ -1132,7 +1199,27 @@ ErrorCode DebugSessionImpl::spawnProcess(StringCollection const &args,
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::fetchStopInfoForAllThreads(
+void DebugSessionImplBase::appendOutput(char const *buf, size_t size) {
+  for (size_t i = 0; i < size; ++i) {
+    this->_consoleBuffer += buf[i];
+    if (buf[i] == '\n') {
+      _resumeSessionLock.lock();
+      DS2ASSERT(_resumeSession != nullptr);
+      std::string data = "O";
+      data += ToHex(this->_consoleBuffer);
+      _consoleBuffer.clear();
+      this->_resumeSession->send(data);
+      _resumeSessionLock.unlock();
+    }
+  }
+}
+
+ErrorCode DebugSessionImplBase::onSendInput(Session &session,
+                                            ByteVector const &buf) {
+  return _spawner.input(buf);
+}
+
+ErrorCode DebugSessionImplBase::fetchStopInfoForAllThreads(
     Session &session, std::vector<StopInfo> &stops, StopInfo &processStop) {
   ErrorCode error =
       onQueryThreadStopInfo(session, ProcessThreadId(), processStop);
@@ -1149,8 +1236,9 @@ ErrorCode DebugSessionImpl::fetchStopInfoForAllThreads(
   return kSuccess;
 }
 
-ErrorCode DebugSessionImpl::createThreadsStopInfo(Session &session,
-                                                  JSArray &threadsStopInfo) {
+ErrorCode
+DebugSessionImplBase::createThreadsStopInfo(Session &session,
+                                            JSArray &threadsStopInfo) {
   StopInfo processStop;
   std::vector<StopInfo> stops;
   ErrorCode error = fetchStopInfoForAllThreads(session, stops, processStop);

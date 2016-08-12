@@ -10,19 +10,21 @@
 
 #include "DebugServer2/GDBRemote/ProtocolHelpers.h"
 #include "DebugServer2/GDBRemote/Types.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Utils/HexValues.h"
 #include "DebugServer2/Utils/Log.h"
 #include "DebugServer2/Utils/String.h"
+#include "DebugServer2/Utils/Stringify.h"
 #include "DebugServer2/Utils/SwapEndian.h"
 #include "JSObjects/JSObjects.h"
 
+#include <cerrno>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
 
-#if defined(OS_LINUX) || defined(OS_FREEBSD) || defined(OS_DARWIN)
+#if defined(OS_POSIX)
 #define FORMAT_ID(ID) ID
 #elif defined(OS_WIN32)
 #define FORMAT_ID(ID) 0
@@ -30,7 +32,7 @@
 #error "Target not supported."
 #endif
 
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
 
 namespace ds2 {
 namespace GDBRemote {
@@ -165,26 +167,70 @@ std::string ProcessThreadId::encode(CompatibilityMode mode) const {
   return ss.str();
 }
 
-std::string StopInfo::reasonToString() const {
+void StopInfo::getWatchpointInfo(std::string &key, std::string &val,
+                                 CompatibilityMode mode, bool encodeHex) const {
+  std::ostringstream ss;
+
+  if (mode == kCompatibilityModeLLDB) {
+    key = "description";
+    ss << watchpointAddress << " " << watchpointIndex;
+  } else {
+    switch (reason) {
+    case StopInfo::kReasonWriteWatchpoint:
+      key = "watch";
+      break;
+    case StopInfo::kReasonReadWatchpoint:
+      key = "rwatch";
+      break;
+    case StopInfo::kReasonAccessWatchpoint:
+      key = "awatch";
+      break;
+    default:
+      DS2BUG("Watchpoint stop reason invalid");
+    }
+    ss << std::hex << watchpointAddress;
+  }
+
+  val = encodeHex ? ToHex(ss.str()) : ss.str();
+}
+
+void StopInfo::reasonToString(std::string &key, std::string &val,
+                              CompatibilityMode mode) const {
+  key = "reason";
+
   switch (reason) {
+  case StopInfo::kReasonTrace:
+    val = "trace";
+    break;
   case StopInfo::kReasonBreakpoint:
-    return "breakpoint";
+    val = "breakpoint";
+    break;
   case StopInfo::kReasonSignalStop:
-    return "signal";
+    val = "signal";
+    break;
   case StopInfo::kReasonTrap:
-    return "trap";
+    val = "trap";
+    break;
   case StopInfo::kReasonWriteWatchpoint:
-    return "watch";
   case StopInfo::kReasonReadWatchpoint:
-    return "rwatch";
   case StopInfo::kReasonAccessWatchpoint:
-    return "awatch";
+    if (mode == kCompatibilityModeLLDB) {
+      val = "watchpoint";
+    } else {
+      key = "";
+      val = "";
+    }
+    break;
 #if defined(OS_WIN32)
   case StopInfo::kReasonLibraryEvent:
-    return "library";
+    key = "library";
+    val = "1";
+    break;
 #endif
   default:
-    DS2BUG("impossible to convert %s to string", Stringify::StopReason(reason));
+    key = "";
+    val = "";
+    break;
   }
 }
 
@@ -203,35 +249,16 @@ std::string StopInfo::encodeInfo(CompatibilityMode mode,
     ss << ';' << "core:" << core;
   }
 
-  switch (reason) {
-  case StopInfo::kReasonNone:
-    break;
+  std::string key, val;
+  reasonToString(key, val, mode);
 
-  case StopInfo::kReasonWriteWatchpoint:
-  case StopInfo::kReasonReadWatchpoint:
-  case StopInfo::kReasonAccessWatchpoint:
-#if defined(OS_WIN32)
-  case StopInfo::kReasonLibraryEvent:
-#endif
-    ss << ';' << reasonToString() << ':' << 1;
-    break;
+  if (!key.empty() && !val.empty()) {
+    ss << ';' << key << ':' << val;
+  }
 
-  case StopInfo::kReasonBreakpoint:
-  case StopInfo::kReasonSignalStop:
-  case StopInfo::kReasonTrap:
-    if (mode == kCompatibilityModeLLDB)
-      ss << ';' << "reason:" << reasonToString();
-    break;
-
-  case StopInfo::kReasonThreadCreate:
-  case StopInfo::kReasonThreadExit:
-#if defined(OS_WIN32)
-  case StopInfo::kReasonMemoryError:
-  case StopInfo::kReasonMemoryAlignment:
-  case StopInfo::kReasonMathError:
-  case StopInfo::kReasonInstructionError:
-#endif
-    break;
+  if (watchpointAddress) {
+    getWatchpointInfo(key, val, mode, mode == kCompatibilityModeLLDB);
+    ss << ';' << key << ':' << val;
   }
 
   if (listThreads) {
@@ -357,7 +384,13 @@ std::string StopInfo::encode(CompatibilityMode mode, bool listThreads) const {
     break;
 
   case kEventKill:
-    ss << 'X' << HEX(2) << (signal & 0xff) << DEC;
+    ss << 'X' << HEX(2);
+#if !defined(OS_WIN32)
+    ss << (signal & 0xff);
+#else
+    ss << 9; // SIGKILL
+#endif
+    ss << DEC;
     break;
 
   default:
@@ -385,8 +418,8 @@ std::string
 StopInfo::encodeWithAllThreads(CompatibilityMode mode,
                                const JSArray &threadsStopInfo) const {
   std::ostringstream ss;
-  ss << encode(mode, true)
-     << "jstopinfo:" << StringToHex(threadsStopInfo.toString()) << ";";
+  ss << encode(mode, true) << "jstopinfo:" << ToHex(threadsStopInfo.toString())
+     << ";";
   return ss.str();
 }
 
@@ -398,6 +431,12 @@ JSDictionary *StopInfo::encodeJson() const {
 
   if (core)
     threadObj->set("core", JSInteger::New(core));
+
+  if (watchpointAddress) {
+    std::string key, val;
+    getWatchpointInfo(key, val, kCompatibilityModeLLDB, false);
+    threadObj->set(key, JSString::New(val));
+  }
 
   auto regSet = JSDictionary::New();
   std::map<std::string, std::string> regs;
@@ -417,16 +456,10 @@ JSDictionary *StopInfo::encodeBriefJson() const {
 
   threadObj->set("tid", JSInteger::New(ptid.tid));
 
-  switch (reason) {
-  case StopInfo::kReasonBreakpoint:
-  case StopInfo::kReasonSignalStop:
-  case StopInfo::kReasonTrap:
-  case StopInfo::kReasonWriteWatchpoint:
-  case StopInfo::kReasonReadWatchpoint:
-  case StopInfo::kReasonAccessWatchpoint:
-    threadObj->set("reason", JSString::New(reasonToString()));
-  default:
-    break;
+  std::string key, val;
+  reasonToString(key, val, kCompatibilityModeLLDB);
+  if (!key.empty() && !val.empty()) {
+    threadObj->set(key, JSString::New(val));
   }
 
   return threadObj;
@@ -463,10 +496,10 @@ std::string HostInfo::encode() const {
     ss << "vendor:" << osVendor << ';';
   }
   if (!osBuild.empty()) {
-    ss << "os_build:" << StringToHex(osBuild) << ';';
+    ss << "os_build:" << ToHex(osBuild) << ';';
   }
   if (!osKernel.empty()) {
-    ss << "os_kernel:" << StringToHex(osKernel) << ';';
+    ss << "os_kernel:" << ToHex(osKernel) << ';';
   }
   if (!osVersion.empty()) {
     unsigned int major, minor, revision;
@@ -483,7 +516,7 @@ std::string HostInfo::encode() const {
     }
   }
   if (!hostName.empty()) {
-    ss << "hostname:" << StringToHex(hostName) << ';';
+    ss << "hostname:" << ToHex(hostName) << ';';
   }
   ss << "endian:";
   switch (endian) {
@@ -539,8 +572,8 @@ std::string ProcessInfo::encode(CompatibilityMode mode,
     ss << "euid:" << DEC << effectiveUid << ';';
     ss << "egid:" << DEC << effectiveGid << ';';
 #endif
-    ss << "name:" << StringToHex(name) << ';';
-    ss << "triple:" << StringToHex(triple) << ';';
+    ss << "name:" << ToHex(name) << ';';
+    ss << "triple:" << ToHex(triple) << ';';
   } else {
     ss << "pid:" << HEX0 << pid << ';';
     ss << "real-uid:" << HEX0 << FORMAT_ID(realUid) << ';';
@@ -551,7 +584,7 @@ std::string ProcessInfo::encode(CompatibilityMode mode,
     ss << "effective-gid:" << HEX0 << effectiveGid << ';';
 #endif
     if (mode == kCompatibilityModeLLDB) {
-      ss << "triple:" << StringToHex(triple) << ';';
+      ss << "triple:" << ToHex(triple) << ';';
     } else {
       // CPU{,Sub}Type contains an `enum CPUType`, and nativeCPU{,Sub}Type
       // contains the actual value that will be sent on the wire (e.g.: for ELF

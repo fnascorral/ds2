@@ -41,10 +41,21 @@ git_clone() {
 }
 
 num_cpus() {
-  num_cpus=$(grep -c "^processor" /proc/cpuinfo)
+  case "$(uname)" in
+    Darwin) num_cpus=$(sysctl -n hw.ncpu);;
+    Linux) num_cpus=$(grep -c "^processor" /proc/cpuinfo);;
+    *) die "Unknown OS '$(uname)'.";;
+  esac
   echo $(($num_cpus * 5 / 4))
 }
+
+realpath() { python -c "import os,sys; print os.path.realpath(sys.argv[1])" "$1"; }
 
 same_dir() {
   [ "$(realpath "$1")" = "$(realpath "$2")" ]
 }
+
+exit_handlers="exit"
+exit_handler() { set +e; eval "$exit_handlers"; }
+trap exit_handler EXIT
+add_exit_handler() { exit_handlers="$*; $exit_handlers"; }

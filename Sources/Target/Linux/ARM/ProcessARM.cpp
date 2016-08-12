@@ -9,16 +9,11 @@
 //
 
 #include "DebugServer2/Target/Process.h"
-#include "DebugServer2/HardwareBreakpointManager.h"
 #include "DebugServer2/Host/Platform.h"
-#include "DebugServer2/SoftwareBreakpointManager.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Target/Thread.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
-//
-// Include system header files for constants.
-//
 #include <cstdlib>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -27,10 +22,8 @@
 // TODO: Identify ARMv7 at runtime.
 //
 
-using ds2::Architecture::GDBDescriptor;
-using ds2::Architecture::LLDBDescriptor;
 using ds2::Host::Platform;
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
 
 namespace ds2 {
 namespace Target {
@@ -39,7 +32,7 @@ namespace Linux {
 namespace {
 
 template <typename T>
-static inline void InitCodeVector(U8Vector &codestr, T const &init) {
+static inline void InitCodeVector(ByteVector &codestr, T const &init) {
   uint8_t const *bptr = reinterpret_cast<uint8_t const *>(&init);
   uint8_t const *eptr = bptr + sizeof init;
 
@@ -122,7 +115,7 @@ static uint16_t const gT2MunmapCode[] = {
 };
 
 static void T2PrepareMmapCode(size_t size, uint32_t protection,
-                              U8Vector &codestr) {
+                              ByteVector &codestr) {
   InitCodeVector(codestr, gT2MmapCode);
 
   uint16_t *code = reinterpret_cast<uint16_t *>(&codestr[0]);
@@ -134,7 +127,7 @@ static void T2PrepareMmapCode(size_t size, uint32_t protection,
 }
 
 static void T2PrepareMunmapCode(uint32_t address, size_t size,
-                                U8Vector &codestr) {
+                                ByteVector &codestr) {
   InitCodeVector(codestr, gT2MunmapCode);
 
   uint16_t *code = reinterpret_cast<uint16_t *>(&codestr[0]);
@@ -174,7 +167,7 @@ static uint16_t const gT1MunmapCode[] = {
 };
 
 static void T1PrepareMmapCode(size_t size, uint32_t protection,
-                              U8Vector &codestr) {
+                              ByteVector &codestr) {
   InitCodeVector(codestr, gT1MmapCode);
 
   uint16_t *code = reinterpret_cast<uint16_t *>(&codestr[0]);
@@ -185,7 +178,7 @@ static void T1PrepareMmapCode(size_t size, uint32_t protection,
 }
 
 static void T1PrepareMunmapCode(uint32_t address, size_t size,
-                                U8Vector &codestr) {
+                                ByteVector &codestr) {
   InitCodeVector(codestr, gT1MunmapCode);
 
   uint16_t *code = reinterpret_cast<uint16_t *>(&codestr[0]);
@@ -196,7 +189,7 @@ static void T1PrepareMunmapCode(uint32_t address, size_t size,
 #endif
 
 static void ThumbPrepareMmapCode(size_t size, uint32_t protection,
-                                 U8Vector &codestr) {
+                                 ByteVector &codestr) {
 #if (__ARM_ARCH >= 7)
   T2PrepareMmapCode(size, protection, codestr);
 #else
@@ -205,7 +198,7 @@ static void ThumbPrepareMmapCode(size_t size, uint32_t protection,
 }
 
 static void ThumbPrepareMunmapCode(uint32_t address, size_t size,
-                                   U8Vector &codestr) {
+                                   ByteVector &codestr) {
 #if (__ARM_ARCH >= 7)
   T2PrepareMunmapCode(address, size, codestr);
 #else
@@ -242,7 +235,7 @@ static uint32_t const gARMMunmapCode[] = {
 };
 
 static void ARMPrepareMmapCode(size_t size, uint32_t protection,
-                               U8Vector &codestr) {
+                               ByteVector &codestr) {
   InitCodeVector(codestr, gARMMmapCode);
 
   uint32_t *code = reinterpret_cast<uint32_t *>(&codestr[0]);
@@ -253,7 +246,7 @@ static void ARMPrepareMmapCode(size_t size, uint32_t protection,
 }
 
 static void ARMPrepareMunmapCode(uint32_t address, size_t size,
-                                 U8Vector &codestr) {
+                                 ByteVector &codestr) {
   InitCodeVector(codestr, gARMMunmapCode);
 
   uint32_t *code = reinterpret_cast<uint32_t *>(&codestr[0]);
@@ -277,11 +270,11 @@ ErrorCode Process::allocateMemory(size_t size, uint32_t protection,
   // We need to know if the process is running in Thumb or ARM mode.
   //
   Architecture::CPUState state;
-  error = ptrace().readCPUState(_pid, info, state);
+  error = ptrace().readCPUState(_currentThread->tid(), info, state);
   if (error != kSuccess)
     return error;
 
-  U8Vector codestr;
+  ByteVector codestr;
   if (state.isThumb()) {
     ThumbPrepareMmapCode(size, protection, codestr);
     // If the current PC is not aligned (thumb has 16bit instructions), add a
@@ -317,11 +310,11 @@ ErrorCode Process::deallocateMemory(uint64_t address, size_t size) {
   // We need to know if the process is running in Thumb or ARM mode.
   //
   Architecture::CPUState state;
-  error = ptrace().readCPUState(_pid, info, state);
+  error = ptrace().readCPUState(_currentThread->tid(), info, state);
   if (error != kSuccess)
     return error;
 
-  U8Vector codestr;
+  ByteVector codestr;
   if (state.isThumb()) {
     ThumbPrepareMunmapCode(address, size, codestr);
     // If the current PC is not aligned (thumb has 16bit instructions), add a
@@ -351,26 +344,6 @@ ErrorCode Process::deallocateMemory(uint64_t address, size_t size) {
   return kSuccess;
 }
 
-SoftwareBreakpointManager *Process::softwareBreakpointManager() const {
-  if (_softwareBreakpointManager == nullptr) {
-    const_cast<Process *>(this)->_softwareBreakpointManager =
-        new Architecture::ARM::SoftwareBreakpointManager(
-            reinterpret_cast<Target::Process *>(const_cast<Process *>(this)));
-  }
-
-  return _softwareBreakpointManager;
-}
-
-HardwareBreakpointManager *Process::hardwareBreakpointManager() const {
-  if (_hardwareBreakpointManager == nullptr) {
-    const_cast<Process *>(this)->_hardwareBreakpointManager =
-        new Architecture::ARM::HardwareBreakpointManager(
-            reinterpret_cast<Target::Process *>(const_cast<Process *>(this)));
-  }
-
-  return _hardwareBreakpointManager;
-}
-
 int Process::getMaxBreakpoints() const {
   return ptrace().getMaxHardwareBreakpoints(_pid);
 }
@@ -381,14 +354,6 @@ int Process::getMaxWatchpoints() const {
 
 int Process::getMaxWatchpointSize() const {
   return ptrace().getMaxWatchpointSize(_pid);
-}
-
-GDBDescriptor const *Process::getGDBRegistersDescriptor() const {
-  return &Architecture::ARM::GDB;
-}
-
-LLDBDescriptor const *Process::getLLDBRegistersDescriptor() const {
-  return &Architecture::ARM::LLDB;
 }
 }
 }

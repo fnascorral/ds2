@@ -21,7 +21,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
@@ -33,129 +32,27 @@ namespace Darwin {
 
 using Host::Darwin::LibProc;
 
-Thread::Thread(Process *process, ThreadId tid) : super(process, tid) {
-  //
-  // Initially the thread is stopped.
-  //
-  _state = kStopped;
-  _lastSyscallNumber = -1;
-}
-
-Thread::~Thread() {}
-
-ErrorCode Thread::terminate() {
-  return process()->ptrace().kill(ProcessThreadId(process()->pid(), tid()),
-                                  SIGKILL);
-}
-
-ErrorCode Thread::suspend() {
-  ErrorCode error = kSuccess;
-  if (_state == kRunning) {
-    error =
-        process()->ptrace().suspend(ProcessThreadId(process()->pid(), tid()));
-    if (error != kSuccess)
-      return error;
-
-    int status;
-    error = process()->ptrace().wait(ProcessThreadId(process()->pid(), tid()),
-                                     &status);
-    if (error != kSuccess) {
-      DS2LOG(Error, "failed to wait for tid %d, error=%s\n", tid(),
-             strerror(errno));
-      return error;
-    }
-
-    updateStopInfo(status);
-  }
-
-  if (_state == kTerminated) {
-    error = kErrorProcessNotFound;
-  }
-
-  return error;
-}
-
-ErrorCode Thread::step(int signal, Address const &address) {
-  if (_state == kInvalid || _state == kRunning) {
-    return kErrorInvalidArgument;
-  } else if (_state == kTerminated) {
-    return kErrorProcessNotFound;
-  }
-
-  DS2LOG(Debug, "stepping tid %d", tid());
-
-  ProcessInfo info;
-  ErrorCode error = process()->getInfo(info);
-  if (error != kSuccess) {
-    return error;
-  }
-
-  error = process()->ptrace().step(ProcessThreadId(process()->pid(), tid()),
-                                   info, signal, address);
-  if (error != kSuccess) {
-    return error;
-  }
-
-  _state = kStepped;
-  return kSuccess;
-}
-
-ErrorCode Thread::resume(int signal, Address const &address) {
-  ErrorCode error = kSuccess;
-  if (_state == kStopped || _state == kStepped) {
-    if (signal == 0) {
-      switch (_stopInfo.signal) {
-      case SIGCHLD:
-      case SIGSTOP:
-      case SIGTRAP:
-        signal = 0;
-        break;
-      default:
-        signal = _stopInfo.signal;
-        break;
-      }
-    }
-
-    ProcessInfo info;
-
-    error = process()->getInfo(info);
-    if (error != kSuccess)
-      return error;
-
-    error = process()->ptrace().resume(ProcessThreadId(process()->pid(), tid()),
-                                       info, signal, address);
-    if (error == kSuccess) {
-      _state = kRunning;
-      _stopInfo.signal = 0;
-    }
-  } else if (_state == kTerminated) {
-    error = kErrorProcessNotFound;
-  }
-  return error;
-}
+Thread::Thread(ds2::Target::Process *process, ThreadId tid)
+    : super(process, tid), _lastSyscallNumber(-1) {}
 
 ErrorCode Thread::readCPUState(Architecture::CPUState &state) {
   // TODO cache CPU state
   ProcessInfo info;
-  ErrorCode error;
-
-  error = _process->getInfo(info);
+  ErrorCode error = _process->getInfo(info);
   if (error != kSuccess)
     return error;
 
-  return process()->ptrace().readCPUState(
+  return process()->mach().readCPUState(
       ProcessThreadId(process()->pid(), tid()), info, state);
 }
 
 ErrorCode Thread::writeCPUState(Architecture::CPUState const &state) {
   ProcessInfo info;
-  ErrorCode error;
-
-  error = _process->getInfo(info);
+  ErrorCode error = _process->getInfo(info);
   if (error != kSuccess)
     return error;
 
-  return process()->ptrace().writeCPUState(
+  return process()->mach().writeCPUState(
       ProcessThreadId(process()->pid(), tid()), info, state);
 }
 
@@ -191,7 +88,33 @@ void Thread::updateState(bool force) {
     return;
   }
 
-  _state = kInvalid;
+  struct thread_basic_info info;
+  ProcessThreadId ptid(process()->pid(), tid());
+  ErrorCode error = process()->mach().getThreadInfo(ptid, &info);
+  if (error != kSuccess) {
+    info.run_state = 0;
+  }
+
+  switch (info.run_state) {
+  case TH_STATE_HALTED:
+    _state = kTerminated;
+    break;
+
+  case TH_STATE_RUNNING:
+  case TH_STATE_UNINTERRUPTIBLE:
+    _state = kRunning;
+    break;
+
+  case TH_STATE_WAITING:
+  case TH_STATE_STOPPED:
+    _state = kStopped;
+    break;
+
+  default:
+    _state = kInvalid;
+    break;
+  }
+
   _stopInfo.core = 0; // TODO
 }
 }

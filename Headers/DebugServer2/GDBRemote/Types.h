@@ -48,6 +48,8 @@ public:
   std::string threadName;
   Architecture::GPRegisterStopMap registers;
   std::set<ThreadId> threads;
+  Address watchpointAddress;
+  int watchpointIndex;
 
 public:
   std::string encode(CompatibilityMode mode, bool listThreads) const;
@@ -57,7 +59,10 @@ public:
   JSDictionary *encodeBriefJson() const;
 
 private:
-  std::string reasonToString() const;
+  void getWatchpointInfo(std::string &key, std::string &val,
+                         CompatibilityMode mode, bool encodeHex) const;
+  void reasonToString(std::string &key, std::string &val,
+                      CompatibilityMode mode) const;
   std::string encodeInfo(CompatibilityMode mode, bool listThreads) const;
   void encodeRegisters(std::map<std::string, std::string> &regs,
                        bool hexIndex) const;
@@ -70,6 +75,8 @@ public:
     registers.clear();
     threads.clear();
     ds2::StopInfo::clear();
+    watchpointAddress = 0;
+    watchpointIndex = -1;
   }
 };
 

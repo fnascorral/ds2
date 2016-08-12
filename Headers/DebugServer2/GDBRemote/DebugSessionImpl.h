@@ -12,15 +12,17 @@
 #define __DebugServer2_GDBRemote_DebugSessionImpl_h
 
 #include "DebugServer2/GDBRemote/DummySessionDelegateImpl.h"
+#include "DebugServer2/GDBRemote/Mixins/FileOperationsMixin.h"
 #include "DebugServer2/Host/ProcessSpawner.h"
 #include "DebugServer2/Target/Process.h"
 #include "DebugServer2/Target/Thread.h"
+#include "DebugServer2/Utils/MPL.h"
 
 #include <mutex>
 
 namespace ds2 {
 namespace GDBRemote {
-class DebugSessionImpl : public DummySessionDelegateImpl {
+class DebugSessionImplBase : public DummySessionDelegateImpl {
 protected:
   Target::Process *_process;
   std::vector<int> _programmedSignals;
@@ -38,10 +40,11 @@ protected:
   std::string _consoleBuffer;
 
 public:
-  DebugSessionImpl(StringCollection const &args, EnvironmentBlock const &env);
-  DebugSessionImpl(int attachPid);
-  DebugSessionImpl();
-  ~DebugSessionImpl() override;
+  DebugSessionImplBase(StringCollection const &args,
+                       EnvironmentBlock const &env);
+  DebugSessionImplBase(int attachPid);
+  DebugSessionImplBase();
+  ~DebugSessionImplBase() override;
 
 protected:
   size_t getGPRSize() const override;
@@ -58,6 +61,7 @@ protected:
   ErrorCode onProgramSignals(Session &session,
                              std::vector<int> const &signals) override;
   ErrorCode onNonStopMode(Session &session, bool enable) override;
+  ErrorCode onSendInput(Session &session, ByteVector const &buf) override;
 
 protected:
   ErrorCode onQueryCurrentThread(Session &session,
@@ -75,6 +79,10 @@ protected:
 
   ErrorCode onQueryThreadList(Session &session, ProcessId pid, ThreadId lastTid,
                               ThreadId &tid) const override;
+
+  ErrorCode onQueryFileLoadAddress(Session &session,
+                                   std::string const &file_path,
+                                   Address &address) override;
 
 protected:
   ErrorCode onQueryRegisterInfo(Session &session, uint32_t regno,
@@ -115,9 +123,9 @@ protected:
 
 protected:
   ErrorCode onReadMemory(Session &session, Address const &address,
-                         size_t length, std::string &data) override;
+                         size_t length, ByteVector &data) override;
   ErrorCode onWriteMemory(Session &session, Address const &address,
-                          std::string const &data, size_t &nwritten) override;
+                          ByteVector const &data, size_t &nwritten) override;
 
   ErrorCode onAllocateMemory(Session &session, size_t size,
                              uint32_t permissions, Address &address) override;
@@ -146,6 +154,7 @@ protected:
   ErrorCode onTerminate(Session &session, ProcessThreadId const &ptid,
                         StopInfo &stop) override;
   ErrorCode onDetach(Session &session, ProcessId pid, bool stopped) override;
+  ErrorCode onExitServer(Session &session) override;
 
 protected:
   ErrorCode onInsertBreakpoint(Session &session, BreakpointType type,
@@ -158,7 +167,9 @@ protected:
 
 protected:
   Target::Thread *findThread(ProcessThreadId const &ptid) const;
-  ErrorCode queryStopCode(Session &session, ProcessThreadId const &ptid,
+  ErrorCode queryStopInfo(Session &session, Target::Thread *thread,
+                          StopInfo &stop) const;
+  ErrorCode queryStopInfo(Session &session, ProcessThreadId const &ptid,
                           StopInfo &stop) const;
 
 protected:
@@ -171,7 +182,11 @@ protected:
 private:
   ErrorCode spawnProcess(StringCollection const &args,
                          EnvironmentBlock const &env);
+  void appendOutput(char const *buf, size_t size);
 };
+
+using DebugSessionImpl =
+    Utils::MixinApply<DebugSessionImplBase, FileOperationsMixin>;
 }
 }
 

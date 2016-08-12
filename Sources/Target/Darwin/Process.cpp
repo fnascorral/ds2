@@ -10,11 +10,10 @@
 
 #define __DS2_LOG_CLASS_NAME__ "Target::Process"
 
-#include "DebugServer2/Target/Darwin/Process.h"
+#include "DebugServer2/Target/Process.h"
 #include "DebugServer2/BreakpointManager.h"
 #include "DebugServer2/Host/Darwin/LibProc.h"
 #include "DebugServer2/Host/Darwin/PTrace.h"
-#include "DebugServer2/Host/POSIX/AsyncProcessWaiter.h"
 #include "DebugServer2/Target/Darwin/Thread.h"
 #include "DebugServer2/Utils/Log.h"
 
@@ -23,7 +22,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
-
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -31,48 +29,18 @@
 using ds2::Host::Darwin::PTrace;
 using ds2::Host::Darwin::LibProc;
 
-#define super MachOProcess
+#define super ds2::Target::Darwin::MachOProcess
 
 namespace ds2 {
 namespace Target {
 namespace Darwin {
 
-Process::Process()
-    : super(), _softwareBreakpointManager(nullptr),
-      _hardwareBreakpointManager(nullptr), _terminated(false) {}
-
-Process::~Process() { terminate(); }
-
-ErrorCode Process::initialize(ProcessId pid, uint32_t flags) {
-  int status;
-
-  // Wait the main thread.
-  ErrorCode error = ptrace().wait(pid, &status);
-  if (error != kSuccess)
-    return error;
-
-  ptrace().traceThat(pid);
-
-  error = super::initialize(pid, flags);
-  if (error != kSuccess)
-    return error;
-
-  return attach(status);
-}
-
 ErrorCode Process::attach(int waitStatus) {
 
   if (waitStatus <= 0) {
-    ErrorCode error = ptrace().attach(_pid);
-    if (error != kSuccess) {
-      return error;
-    }
-
+    CHK(ptrace().attach(_pid));
     _flags |= kFlagAttachedProcess;
-
-    error = ptrace().wait(_pid, &waitStatus);
-    if (error != kSuccess)
-      return error;
+    CHK(ptrace().wait(_pid, &waitStatus));
     ptrace().traceThat(_pid);
   }
 
@@ -247,6 +215,7 @@ ErrorCode Process::terminate() {
 ErrorCode Process::suspend() {
   std::set<Thread *> threads;
   enumerateThreads([&](Thread *thread) { threads.insert(thread); });
+  DS2BUG("not implemented");
 
   for (auto thread : threads) {
     Architecture::CPUState state;
@@ -316,34 +285,50 @@ ErrorCode Process::getMemoryRegionInfo(Address const &address,
 
   info.clear();
 
-  return kErrorNotFound;
+  return mach().getProcessMemoryRegion(_info.pid, address, info);
 }
 
 ErrorCode Process::readString(Address const &address, std::string &str,
                               size_t length, size_t *count) {
   if (_currentThread == nullptr)
-    return super::readString(address, str, length, count);
+    return kErrorProcessNotFound;
 
-  return ptrace().readString(_currentThread->tid(), address, str, length,
-                             count);
+  char buf[length];
+  ErrorCode err;
+
+  err = mach().readMemory(_currentThread->tid(), address, buf, length, count);
+  if (err != kSuccess)
+    return err;
+
+  if (strnlen(buf, length) == length)
+    return kErrorNameTooLong;
+
+  str = std::string(buf);
+  return kSuccess;
 }
 
 ErrorCode Process::readMemory(Address const &address, void *data, size_t length,
                               size_t *count) {
   if (_currentThread == nullptr)
-    return super::readMemory(address, data, length, count);
+    return kErrorProcessNotFound;
 
-  return ptrace().readMemory(_currentThread->tid(), address, data, length,
-                             count);
+  return mach().readMemory(_currentThread->tid(), address, data, length, count);
 }
 
 ErrorCode Process::writeMemory(Address const &address, void const *data,
                                size_t length, size_t *count) {
   if (_currentThread == nullptr)
-    return super::writeMemory(address, data, length, count);
+    return kErrorProcessNotFound;
 
-  return ptrace().writeMemory(_currentThread->tid(), address, data, length,
-                              count);
+  return mach().writeMemory(_currentThread->tid(), address, data, length,
+                            count);
+}
+
+ErrorCode Process::afterResume() {
+  // We are calling the Thread's afterResume from here, but it might make sense
+  // to have this known by ThreadBase and call it from ProcessBase::resume.
+  CHK(_currentThread->afterResume());
+  return super::afterResume();
 }
 }
 }

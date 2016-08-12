@@ -1,4 +1,4 @@
-# ds2 [![Travis Build Status](https://travis-ci.org/facebook/ds2.svg?branch=master)](https://travis-ci.org/facebook/ds2) [![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/sdt15jwwbv2ocdlg/branch/master?svg=true)](https://ci.appveyor.com/project/a20012251/ds2/branch/master) [![Coverage Status](https://coveralls.io/repos/github/facebook/ds2/badge.svg?branch=master)](https://coveralls.io/github/facebook/ds2?branch=master)
+# ds2 [![Travis Build Status](https://travis-ci.org/facebook/ds2.svg?branch=master)](https://travis-ci.org/facebook/ds2/branches) [![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/sdt15jwwbv2ocdlg/branch/master?svg=true)](https://ci.appveyor.com/project/a20012251/ds2/branch/master) [![Coverage Status](https://coveralls.io/repos/github/facebook/ds2/badge.svg?branch=master)](https://coveralls.io/github/facebook/ds2?branch=master)
 
 ds2 is a debug server designed to be used with [LLDB](http://lldb.llvm.org/) to
 perform remote debugging of Linux, Android, FreeBSD, Windows and Windows Phone
@@ -44,7 +44,7 @@ ds2 accepts the following options:
 usage: ds2 [RUN_MODE] [OPTIONS] [[HOST]:PORT] [-- PROGRAM [ARGUMENTS...]]
   -a, --attach ARG           attach to the name or PID specified
   -d, --debug                enable debug log output
-  -D, --debug-remote         enable log for remote protocol packets
+  -D, --remote-debug         enable log for remote protocol packets
   -g, --gdb-compat           force ds2 to run in gdb compat mode
   -k, --keep-alive           keep the server alive after the client disconnects
   -L, --list-processes       list processes debuggable by the current user
@@ -53,6 +53,7 @@ usage: ds2 [RUN_MODE] [OPTIONS] [[HOST]:PORT] [-- PROGRAM [ARGUMENTS...]]
   -n, --no-colors            disable colored output
   -R, --reverse-connect      connect back to the debugger at [HOST]:PORT
   -e, --set-env              add an element to the environment before launch
+  -S, --setsid               make ds2 run in its own session
   -E, --unset-env            remove an element from the environment before lauch
 ```
 
@@ -73,7 +74,7 @@ targets.
 
 ds2 needs cmake, a C++11 compiler, flex and bison.
 
-### Compiling on Linux and FreeBSD
+### Compiling on Linux, FreeBSD and macOS
 
 After cloning the ds2 repository, run the following commands to build for the
 current host:
@@ -105,6 +106,22 @@ cmake ..
 ..\Support\Scripts\build-windows.bat
 ```
 
+### Cross compiling for Windows Phone
+
+ds2 can be built for Windows Phone, which will generate a dll that can later be
+loaded in by the application we are debugging as a separate process. This needs
+Visual Studio 2015.
+
+To build for Windows Phone, use the `Toolchain-WinStore.cmake` toolchain file
+as well as the "Visual Studio 14 2015 ARM" CMake generator.
+
+```sh
+cd ds2
+mkdir build && cd build
+cmake -G "Visual Studio 14 2015 ARM" -DCMAKE_TOOLCHAIN_FILE=../Support/CMake/Toolchain-WinStore.cmake" ..
+..\Support\Scripts\build-windows.bat
+```
+
 ### Cross compiling for Android
 
 For Android native debugging, it is possible to build ds2 with a toolchain from
@@ -123,9 +140,20 @@ cmake -DCMAKE_TOOLCHAIN_FILE=../Support/CMake/Toolchain-Android-ARM.cmake ..
 make
 ```
 
-Builds of ds2 targetting Android generate a static binary by default. The final
-build product can be copied over to the remote device and used with minimal
-dependencies.
+#### Build for Android pre-5.0
+
+`prepare-android-toolchain.sh` prepares a toolchain that targets android 5.0
+and up by default. If you want to build for an older version (4.1 and up), pass
+the API level as argument to that script. This will allow you to run ds2 on
+older devices. The other build steps are the same.
+
+```
+cd ds2
+./Support/Scripts/prepare-android-toolchain.sh arm 16
+mkdir build && cd build
+cmake -DCMAKE_TOOLCHAIN_FILE=../Support/CMake/Toolchain-Android-ARM.cmake ..
+make
+```
 
 ### Cross compiling for Linux-ARM
 

@@ -24,13 +24,11 @@ using ds2::Host::Platform;
 namespace ds2 {
 namespace GDBRemote {
 
-SessionBase::SessionBase()
-    : _channel(nullptr), _delegate(nullptr), _ackmode(true) {
+SessionBase::SessionBase(CompatibilityMode mode)
+    : _channel(nullptr), _delegate(nullptr), _ackmode(true), _compatMode(mode) {
   _processor.setDelegate(&_interpreter);
   _interpreter.setSession(this);
 }
-
-SessionBase::~SessionBase() { delete _channel; }
 
 bool SessionBase::create(Host::Channel *channel) {
   if (_channel != nullptr || channel == nullptr)
@@ -76,32 +74,6 @@ bool SessionBase::parse(std::string const &data) {
   return true;
 }
 
-bool SessionBase::send(std::string const &data, bool escaped) {
-  std::ostringstream ss;
-  std::string encoded;
-  std::string const *datap = &data;
-
-  //
-  // If data contains $, #, } or * we need to escape the
-  // stream.
-  //
-  if (!escaped && data.find_first_of("$#}*") != std::string::npos) {
-    encoded = Escape(data);
-    datap = &encoded;
-  }
-
-  uint8_t csum = Checksum(*datap);
-
-  ss << '$' << *datap << '#' << std::hex << std::setw(2) << std::setfill('0')
-     << (unsigned)csum;
-
-  std::string final_data = ss.str();
-  DS2LOG(Packet, "putpkt(\"%s\", %u)", final_data.c_str(),
-         (unsigned)final_data.length());
-
-  return _channel->send(final_data);
-}
-
 //
 // Functions used by the ProtocolInterpreter
 //
@@ -139,6 +111,25 @@ bool SessionBase::sendACK() { return _channel->send("+", 1) == 1; }
 
 bool SessionBase::sendNAK() { return _channel->send("-", 1) == 1; }
 
+// The GDB protocol specifies whitespace in some packets. However,
+// lldb-server does not use this whitespace, and older versions of
+// lldb will fail if it is used. Don't use a separator in lldb mode.
+const char *SessionBase::getPacketSeparator() {
+  switch (_compatMode) {
+  case kCompatibilityModeGDB:
+  case kCompatibilityModeGDBMultiprocess:
+    return " ";
+
+  case kCompatibilityModeLLDB:
+    return "";
+
+  case kCompatibilityModeLLDBThread:
+    DS2BUG("LLDBThreads is an invalid compatibility mode for SessionBase");
+  }
+
+  DS2_UNREACHABLE();
+}
+
 bool SessionBase::sendError(ErrorCode code) {
   switch (code) {
   case kSuccess:
@@ -152,12 +143,11 @@ bool SessionBase::sendError(ErrorCode code) {
     break;
   }
 
-  char message[4];
-  message[0] = 'E';
-  message[1] = NibbleToHex(code >> 4);
-  message[2] = NibbleToHex(code & 15);
-  message[3] = '\0';
-  return send(message);
+  std::ostringstream ss;
+  ss << "E" << getPacketSeparator();
+  ss << NibbleToHex(code >> 4) << NibbleToHex(code & 15);
+
+  return send(ss.str());
 }
 }
 }

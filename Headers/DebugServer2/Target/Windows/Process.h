@@ -18,11 +18,10 @@ namespace ds2 {
 namespace Target {
 namespace Windows {
 
-class Process : public Target::ProcessBase {
+class Process : public ds2::Target::ProcessBase,
+                public ds2::make_unique_enabler<Process> {
 protected:
   HANDLE _handle;
-  SoftwareBreakpointManager *_softwareBreakpointManager;
-  bool _terminated;
 
 protected:
   Process();
@@ -35,6 +34,9 @@ public:
 
 protected:
   ErrorCode initialize(ProcessId pid, uint32_t flags) override;
+
+private:
+  ErrorCode writeDebugBreakCode(uint64_t address);
 
 public:
   ErrorCode detach() override;
@@ -60,24 +62,9 @@ public:
   ErrorCode updateInfo() override;
 
 public:
-  SoftwareBreakpointManager *softwareBreakpointManager() const override;
-  HardwareBreakpointManager *hardwareBreakpointManager() const override {
-    return nullptr;
-  }
-
-public:
-  bool isELFProcess() const override { return false; }
-
-public:
   ErrorCode allocateMemory(size_t size, uint32_t protection,
                            uint64_t *address) override;
   ErrorCode deallocateMemory(uint64_t address, size_t size) override;
-
-public:
-  // TODO(sas): These two functions should be removed, and DebugSessionImpl
-  // should be modified to call these only for POSIX targets.
-  void resetSignalPass() {}
-  void setSignalPass(int signo, bool set) {}
 
 public:
   ErrorCode wait() override;
@@ -87,23 +74,8 @@ public:
   static Target::Process *Attach(ProcessId pid);
 
 public:
-  ErrorCode getSharedLibraryInfoAddress(Address &address) {
-    return kErrorUnsupported;
-  }
   ErrorCode enumerateSharedLibraries(
-      std::function<void(SharedLibraryInfo const &)> const &cb);
-
-public:
-  Architecture::GDBDescriptor const *getGDBRegistersDescriptor() const override;
-  Architecture::LLDBDescriptor const *
-  getLLDBRegistersDescriptor() const override;
-
-#if defined(ARCH_ARM)
-public:
-  int getMaxBreakpoints() const;
-  int getMaxWatchpoints() const;
-  int getMaxWatchpointSize() const;
-#endif
+      std::function<void(SharedLibraryInfo const &)> const &cb) override;
 };
 }
 }

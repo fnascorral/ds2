@@ -12,8 +12,8 @@
 #define __DebugServer2_Host_POSIX_PTrace_h
 
 #include "DebugServer2/Architecture/CPUState.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <cerrno>
 #include <csignal>
@@ -28,14 +28,13 @@ namespace POSIX {
 
 class PTrace {
 public:
-  PTrace();
-  virtual ~PTrace();
+  virtual ~PTrace() = default;
 
 public:
   virtual ErrorCode wait(ProcessThreadId const &ptid, int *status = nullptr);
 
 public:
-  virtual ErrorCode traceMe(bool disableASLR) = 0;
+  virtual ErrorCode traceMe(bool disableASLR);
   virtual ErrorCode traceThat(ProcessId pid) = 0;
 
 public:
@@ -65,18 +64,18 @@ public:
                                   Architecture::CPUState const &state) = 0;
 
 public:
-  virtual ErrorCode suspend(ProcessThreadId const &ptid) = 0;
+  virtual ErrorCode suspend(ProcessThreadId const &ptid);
+
+private:
+  ErrorCode doStepResume(bool stepping, ProcessThreadId const &ptid, int signal,
+                         Address const &address);
 
 public:
   virtual ErrorCode step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
-                         int signal = 0,
-                         Address const &address = Address()) = 0;
+                         int signal = 0, Address const &address = Address());
   virtual ErrorCode resume(ProcessThreadId const &ptid,
                            ProcessInfo const &pinfo, int signal = 0,
-                           Address const &address = Address()) = 0;
-
-public:
-  virtual ErrorCode getEventPid(ProcessThreadId const &ptid, ProcessId &pid);
+                           Address const &address = Address());
 
 public:
   virtual ErrorCode getSigInfo(ProcessThreadId const &ptid, siginfo_t &si) = 0;
@@ -86,14 +85,39 @@ public:
                             ProcessInfo const &pinfo, void const *code,
                             size_t length, uint64_t &result);
 
+#if defined(OS_LINUX)
+#if defined(ARCH_ARM) || defined(ARCH_ARM64)
+public:
+  virtual int getMaxHardwareBreakpoints(ProcessThreadId const &ptid) = 0;
+  virtual int getMaxHardwareWatchpoints(ProcessThreadId const &ptid) = 0;
+#endif
+
+#if defined(ARCH_ARM)
+public:
+  virtual int getMaxWatchpointSize(ProcessThreadId const &ptid) = 0;
+
+public:
+  virtual ErrorCode writeHardwareBreakpoint(ProcessThreadId const &ptid,
+                                            uint32_t addr, uint32_t ctrl,
+                                            size_t idx) = 0;
+  virtual ErrorCode writeHardwareWatchpoint(ProcessThreadId const &ptid,
+                                            uint32_t addr, uint32_t ctrl,
+                                            size_t idx) = 0;
+#elif defined(ARCH_X86) || defined(ARCH_X86_64)
+public:
+  virtual uintptr_t readDebugReg(ProcessThreadId const &ptid, size_t idx) = 0;
+  virtual ErrorCode writeDebugReg(ProcessThreadId const &ptid, size_t idx,
+                                  uintptr_t val) = 0;
+#endif // ARCH
+#endif // OS_LINUX
+
 protected:
   template <typename CommandType, typename AddrType, typename DataType>
-  long wrapPtrace(CommandType request, pid_t pid, AddrType addr,
-                  DataType data) {
+  long wrapPtrace(CommandType request, pid_t pid, AddrType addr, DataType data,
+                  int retries = 3) {
 #if defined(OS_LINUX)
-// Use __ANDROID__ and not PLATFORM_ANDROID. The android toolchain is the
-// one that declares ptrace() with an int command.
-#if defined(__ANDROID__)
+// The android toolchain declares ptrace() with an int command.
+#if defined(PLATFORM_ANDROID)
     typedef int PTraceRequestType;
 #else
     typedef enum __ptrace_request PTraceRequestType;
@@ -110,30 +134,30 @@ protected:
 
     do {
       if (ret < 0) {
-        DS2LOG(Warning, "ptrace command %s on pid %d returned EAGAIN, retrying",
-               ds2::Support::Stringify::Ptrace(request), pid);
+        retries--;
+        DS2LOG(Warning, "ptrace command %s on pid %d returned %s, retrying",
+               ds2::Utils::Stringify::Ptrace(request), pid,
+               ds2::Utils::Stringify::Errno(errno));
       }
+
+      // Clear errno so we can check it afterwards. Just checking the return
+      // value of ptrace won't work because PTRACE_PEEK* commands return the
+      // value read instead of 0 or -1.
+      errno = 0;
 
       ret = ::ptrace(static_cast<PTraceRequestType>(request), pid,
                      (PTraceAddrType)(uintptr_t)addr,
                      (PTraceDataType)(uintptr_t)data);
-    } while (ret < 0 && (errno == EAGAIN || errno == EBUSY));
+    } while (ret < 0 && (errno == EAGAIN || errno == EBUSY) && retries > 0);
 
     if (errno != 0) {
       DS2LOG(Debug, "ran ptrace command %s on pid %d, returned %s",
-             ds2::Support::Stringify::Ptrace(request), pid,
-             ds2::Support::Stringify::Errno(errno));
+             ds2::Utils::Stringify::Ptrace(request), pid,
+             ds2::Utils::Stringify::Errno(errno));
     }
 
     return ret;
   }
-
-#if defined(OS_LINUX) && defined(ARCH_ARM)
-public:
-  virtual int getMaxHardwareBreakpoints(ProcessThreadId const &ptid) = 0;
-  virtual int getMaxHardwareWatchpoints(ProcessThreadId const &ptid) = 0;
-  virtual int getMaxWatchpointSize(ProcessThreadId const &ptid) = 0;
-#endif
 
   virtual ErrorCode ptidToPid(ProcessThreadId const &ptid, pid_t &pid);
 };

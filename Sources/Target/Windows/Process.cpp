@@ -13,26 +13,42 @@
 #include "DebugServer2/Target/Process.h"
 #include "DebugServer2/Host/Platform.h"
 #include "DebugServer2/Host/Windows/ExtraWrappers.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Target/Thread.h"
+#include "DebugServer2/Types.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <psapi.h>
 #include <vector>
 
 using ds2::Host::ProcessSpawner;
 using ds2::Host::Platform;
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
 
 #define super ds2::Target::ProcessBase
+
+#if defined(ARCH_ARM)
+static uint8_t const gDebugBreakCode[] = {
+    0xFE, 0xDE,             // 00: UDF #254
+    0xDF, 0xF8, 0x04, 0x40, // 02: LDR.W R4,[PC, #+0x4]
+    0x20, 0x47,             // 06: BX R4
+    0x00, 0x00, 0x00, 0x00  // 08: RtlExitUserThread address
+};
+static const int gRtlExitUserThreadOffset = 0x08;
+#elif defined(ARCH_X86)
+static uint8_t const gDebugBreakCode[] = {
+    0xCC,                         // 00: int 3
+    0xB8, 0x00, 0x00, 0x00, 0x00, // 01: mov eax, RtlExitUserThread address
+    0xFF, 0xD0                    // 06: call eax
+};
+static const int gRtlExitUserThreadOffset = 0x02;
+#endif
 
 namespace ds2 {
 namespace Target {
 namespace Windows {
 
-Process::Process()
-    : Target::ProcessBase(), _handle(nullptr),
-      _softwareBreakpointManager(nullptr), _terminated(false) {}
+Process::Process() : super(), _handle(nullptr) {}
 
 Process::~Process() { CloseHandle(_handle); }
 
@@ -72,8 +88,9 @@ ErrorCode Process::initialize(ProcessId pid, uint32_t flags) {
 }
 
 Target::Process *Process::Attach(ProcessId pid) {
-  if (pid <= 0)
+  if (pid <= 0) {
     return nullptr;
+  }
 
   BOOL result = DebugActiveProcess(pid);
   if (!result) {
@@ -82,22 +99,22 @@ Target::Process *Process::Attach(ProcessId pid) {
 
   DS2LOG(Debug, "attached to process %" PRIu64, (uint64_t)pid);
 
-  auto process = new Process;
-  ErrorCode error = process->initialize(pid, 0);
-  if (error != kSuccess) {
-    delete process;
+  auto process = make_protected_unique();
+
+  if (process->initialize(pid, kFlagAttachedProcess) != kSuccess) {
     return nullptr;
   }
 
-  return process;
+  return process.release();
 }
 
 ErrorCode Process::detach() {
   prepareForDetach();
 
   BOOL result = DebugActiveProcessStop(_pid);
-  if (!result)
+  if (!result) {
     return Platform::TranslateError();
+  }
 
   cleanup();
   _flags &= ~kFlagAttachedProcess;
@@ -105,10 +122,55 @@ ErrorCode Process::detach() {
   return kSuccess;
 }
 
-ErrorCode Process::interrupt() {
-  BOOL result = DebugBreakProcess(_handle);
-  if (!result)
+ErrorCode Process::writeDebugBreakCode(uint64_t address) {
+  FARPROC exitThreadAddress =
+      GetProcAddress(GetModuleHandleA("ntdll"), "RtlExitUserThread");
+  if (exitThreadAddress == NULL) {
     return Platform::TranslateError();
+  }
+
+  ByteVector codestr(&gDebugBreakCode[0],
+                     &gDebugBreakCode[sizeof(gDebugBreakCode)]);
+  *reinterpret_cast<uint32_t *>(&codestr[gRtlExitUserThreadOffset]) =
+      reinterpret_cast<uint32_t>(exitThreadAddress);
+
+  size_t written;
+  ErrorCode error =
+      writeMemory(Address(address), &codestr[0], codestr.size(), &written);
+  if (error != kSuccess) {
+    return error;
+  }
+  return kSuccess;
+}
+
+ErrorCode Process::interrupt() {
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+
+  uint64_t address;
+  ErrorCode error = allocateMemory(
+      info.dwPageSize, kProtectionExecute | kProtectionWrite, &address);
+  if (error != kSuccess) {
+    return error;
+  }
+
+  error = writeDebugBreakCode(address);
+  if (error != kSuccess) {
+    return error;
+  }
+
+  DWORD threadId;
+#if defined(ARCH_ARM)
+  // +1 indicates the thread to start in THUMB mode
+  auto remoteAddress = address + 1;
+#else
+  auto remoteAddress = address;
+#endif
+  if (CreateRemoteThread(_handle, NULL, 0,
+                         (LPTHREAD_START_ROUTINE)remoteAddress, NULL, 0,
+                         &threadId) == NULL) {
+    return Platform::TranslateError();
+  }
 
   return kSuccess;
 }
@@ -119,14 +181,26 @@ ErrorCode Process::terminate() {
     return Platform::TranslateError();
 
   _terminated = true;
-  return detach();
+  return kSuccess;
 }
 
 bool Process::isAlive() const { return !_terminated; }
 
+template <typename ThreadCollectionType, typename ThreadIdType>
+static Thread *findThread(ThreadCollectionType const &threads,
+                          ThreadIdType tid) {
+  auto threadIt = threads.find(tid);
+  DS2ASSERT(threadIt != threads.end());
+  return threadIt->second;
+}
+
 ErrorCode Process::wait() {
-  if (_terminated)
+  // If _terminated is true, we just called Process::Terminate.
+  if (_terminated) {
+    DS2ASSERT(_currentThread != nullptr);
+    _currentThread->_stopInfo.event = StopInfo::kEventKill;
     return kSuccess;
+  }
 
   for (;;) {
     _currentThread = nullptr;
@@ -152,17 +226,31 @@ ErrorCode Process::wait() {
       _currentThread =
           new Thread(this, GetThreadId(de.u.CreateProcessInfo.hThread),
                      de.u.CreateProcessInfo.hThread);
-      _currentThread->updateState(de);
       return kSuccess;
 
-    case EXIT_PROCESS_DEBUG_EVENT:
+    case EXIT_PROCESS_DEBUG_EVENT: {
+      // We should have received a few EXIT_THREAD_DEBUG_EVENT events and there
+      // should only be one thread left at this point.
+      DS2ASSERT(_threads.size() == 1);
+      _currentThread = findThread(_threads, de.dwThreadId);
+
       _terminated = true;
+      _currentThread->_state = Thread::kTerminated;
+
+      DWORD exitCode;
+      BOOL result = GetExitCodeProcess(_handle, &exitCode);
+      if (!result) {
+        return Platform::TranslateError();
+      }
+
+      _currentThread->_stopInfo.event = StopInfo::kEventExit;
+      _currentThread->_stopInfo.status = exitCode;
       return kSuccess;
+    }
 
     case CREATE_THREAD_DEBUG_EVENT: {
-      _currentThread = new Thread(this, GetThreadId(de.u.CreateThread.hThread),
-                                  de.u.CreateThread.hThread);
-      _currentThread->updateState(de);
+      _currentThread =
+          new Thread(this, de.dwThreadId, de.u.CreateThread.hThread);
       ErrorCode error = _currentThread->resume();
       if (error != kSuccess) {
         return error;
@@ -171,10 +259,7 @@ ErrorCode Process::wait() {
     }
 
     case EXIT_THREAD_DEBUG_EVENT: {
-      auto threadIt = _threads.find(de.dwThreadId);
-      DS2ASSERT(threadIt != _threads.end());
-
-      _currentThread = threadIt->second;
+      _currentThread = findThread(_threads, de.dwThreadId);
       _currentThread->updateState(de);
       ErrorCode error = _currentThread->resume();
       if (error != kSuccess) {
@@ -184,16 +269,11 @@ ErrorCode Process::wait() {
       continue;
     }
 
-    case RIP_EVENT:
-      DS2LOG(Fatal, "debug event RIP");
-
     case EXCEPTION_DEBUG_EVENT:
     case LOAD_DLL_DEBUG_EVENT:
     case UNLOAD_DLL_DEBUG_EVENT:
     case OUTPUT_DEBUG_STRING_EVENT: {
-      auto threadIt = _threads.find(de.dwThreadId);
-      DS2ASSERT(threadIt != _threads.end());
-      _currentThread = threadIt->second;
+      _currentThread = findThread(_threads, de.dwThreadId);
       _currentThread->updateState(de);
 
       ErrorCode error = suspend();
@@ -205,26 +285,45 @@ ErrorCode Process::wait() {
     }
 
     default:
-      DS2BUG("unknown debug event code: %lu", de.dwDebugEventCode);
+      DS2BUG("unknown debug event code: %s",
+             Stringify::DebugEvent(de.dwDebugEventCode));
     }
   }
 }
 
 ErrorCode Process::readString(Address const &address, std::string &str,
                               size_t length, size_t *nread) {
-  return kErrorUnsupported;
+  for (size_t i = 0; i < length; ++i) {
+    char c;
+    ErrorCode error = readMemory(address + i, &c, sizeof(c), nullptr);
+    if (error != kSuccess) {
+      return error;
+    }
+    if (c == '\0') {
+      return kSuccess;
+    }
+    str.push_back(c);
+  }
+
+  return kSuccess;
 }
 
 ErrorCode Process::readMemory(Address const &address, void *data, size_t length,
                               size_t *nread) {
+  SIZE_T bytesRead;
   BOOL result =
       ReadProcessMemory(_handle, reinterpret_cast<LPCVOID>(address.value()),
-                        data, length, reinterpret_cast<SIZE_T *>(nread));
+                        data, length, &bytesRead);
+
+  if (nread != nullptr) {
+    *nread = static_cast<size_t>(bytesRead);
+  }
 
   if (!result) {
     auto error = GetLastError();
-    if (error != ERROR_PARTIAL_COPY)
+    if (error != ERROR_PARTIAL_COPY || bytesRead == 0) {
       return Host::Platform::TranslateError(error);
+    }
   }
 
   return kSuccess;
@@ -232,14 +331,25 @@ ErrorCode Process::readMemory(Address const &address, void *data, size_t length,
 
 ErrorCode Process::writeMemory(Address const &address, void const *data,
                                size_t length, size_t *nwritten) {
+  SIZE_T bytesWritten;
   BOOL result =
       WriteProcessMemory(_handle, reinterpret_cast<LPVOID>(address.value()),
-                         data, length, reinterpret_cast<SIZE_T *>(nwritten));
+                         data, length, &bytesWritten);
+
+  if (nwritten != nullptr) {
+    *nwritten = static_cast<size_t>(bytesWritten);
+  }
 
   if (!result) {
     auto error = GetLastError();
-    if (error != ERROR_PARTIAL_COPY)
+    if (error != ERROR_PARTIAL_COPY || bytesWritten == 0) {
       return Host::Platform::TranslateError(error);
+    }
+  }
+
+  if (!FlushInstructionCache(_handle, reinterpret_cast<LPVOID>(address.value()),
+                             bytesWritten)) {
+    DS2LOG(Warning, "unable to flush instruction cache");
   }
 
   return kSuccess;
@@ -282,21 +392,20 @@ ErrorCode Process::updateInfo() {
 }
 
 ds2::Target::Process *Process::Create(ProcessSpawner &spawner) {
-  ErrorCode error = spawner.run();
-  if (error != kSuccess) {
+  if (spawner.run() != kSuccess) {
     return nullptr;
   }
 
   DS2LOG(Debug, "created process %" PRIu64, (uint64_t)spawner.pid());
 
-  auto process = new Process;
-  error = process->initialize(spawner.pid(), 0);
-  if (error != kSuccess) {
-    delete process;
+  struct MakeUniqueEnabler : public Process {};
+  auto process = ds2::make_unique<MakeUniqueEnabler>();
+
+  if (process->initialize(spawner.pid(), kFlagNewProcess) != kSuccess) {
     return nullptr;
   }
 
-  return process;
+  return process.release();
 }
 
 ErrorCode Process::allocateMemory(size_t size, uint32_t protection,

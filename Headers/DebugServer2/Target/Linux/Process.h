@@ -18,23 +18,12 @@ namespace ds2 {
 namespace Target {
 namespace Linux {
 
-class Process : public ds2::Target::POSIX::ELFProcess {
+class Process : public POSIX::ELFProcess {
 protected:
   Host::Linux::PTrace _ptrace;
-  SoftwareBreakpointManager *_softwareBreakpointManager;
-  HardwareBreakpointManager *_hardwareBreakpointManager;
-  bool _terminated;
 
 protected:
-  friend class POSIX::Process;
-  Process();
-
-public:
-  ~Process() override;
-
-protected:
-  ErrorCode initialize(ProcessId pid, uint32_t flags) override;
-  ErrorCode attach(int waitStatus);
+  ErrorCode attach(int waitStatus) override;
 
 public:
   ErrorCode terminate() override;
@@ -43,6 +32,9 @@ public:
 public:
   ErrorCode getMemoryRegionInfo(Address const &address,
                                 MemoryRegionInfo &info) override;
+
+protected:
+  ErrorCode executeCode(ByteVector const &codestr, uint64_t &result);
 
 public:
   ErrorCode allocateMemory(size_t size, uint32_t protection,
@@ -62,10 +54,6 @@ protected:
   ErrorCode updateInfo() override;
   ErrorCode updateAuxiliaryVector() override;
 
-public:
-  SoftwareBreakpointManager *softwareBreakpointManager() const override;
-  HardwareBreakpointManager *hardwareBreakpointManager() const override;
-
 protected:
   friend class Thread;
   ErrorCode readCPUState(ThreadId tid, Architecture::CPUState &state,
@@ -73,25 +61,15 @@ protected:
   ErrorCode writeCPUState(ThreadId tid, Architecture::CPUState const &state,
                           uint32_t flags = 0);
 
+#if defined(ARCH_ARM)
 public:
-  ErrorCode readString(Address const &address, std::string &str, size_t length,
-                       size_t *count = nullptr) override;
-  ErrorCode readMemory(Address const &address, void *data, size_t length,
-                       size_t *count = nullptr) override;
-  ErrorCode writeMemory(Address const &address, void const *data, size_t length,
-                        size_t *count = nullptr) override;
-
-#if defined(ARCH_ARM) || defined(ARCH_ARM64)
-public:
-  int getMaxBreakpoints() const;
-  int getMaxWatchpoints() const;
-  int getMaxWatchpointSize() const;
+  int getMaxBreakpoints() const override;
+  int getMaxWatchpoints() const override;
+  int getMaxWatchpointSize() const override;
 #endif
 
-public:
-  Architecture::GDBDescriptor const *getGDBRegistersDescriptor() const override;
-  Architecture::LLDBDescriptor const *
-  getLLDBRegistersDescriptor() const override;
+protected:
+  friend class POSIX::Process;
 };
 }
 }

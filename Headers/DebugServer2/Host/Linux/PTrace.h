@@ -23,10 +23,6 @@ struct PTracePrivateData;
 
 class PTrace : public POSIX::PTrace {
 public:
-  PTrace();
-  ~PTrace() override;
-
-public:
   ErrorCode wait(ProcessThreadId const &ptid, int *status = nullptr) override;
 
 public:
@@ -58,17 +54,16 @@ public:
   ErrorCode writeCPUState(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
                           Architecture::CPUState const &state) override;
 
-public:
-  ErrorCode suspend(ProcessThreadId const &ptid) override;
+private:
+  ErrorCode prepareAddressForResume(ProcessThreadId const &ptid,
+                                    ProcessInfo const &pinfo,
+                                    Address const &address);
 
 public:
   ErrorCode step(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
                  int signal = 0, Address const &address = Address()) override;
   ErrorCode resume(ProcessThreadId const &ptid, ProcessInfo const &pinfo,
                    int signal = 0, Address const &address = Address()) override;
-
-public:
-  ErrorCode getEventPid(ProcessThreadId const &ptid, ProcessId &epid) override;
 
 public:
   ErrorCode getSigInfo(ProcessThreadId const &ptid, siginfo_t &si) override;
@@ -80,23 +75,47 @@ protected:
                                      int regSetCode, void const *buffer,
                                      size_t length);
 
+#if defined(ARCH_X86) || defined(ARCH_X86_64)
 protected:
-  void initCPUState(ProcessId pid);
-  void doneCPUState();
+  uintptr_t readUserData(ProcessThreadId const &ptid, uint64_t offset);
+  ErrorCode writeUserData(ProcessThreadId const &ptid, uint64_t offset,
+                          uintptr_t val);
+#endif
 
 // Debug register ptrace APIs only exist for Linux ARM
+#if defined(ARCH_ARM) || defined(ARCH_ARM64)
+public:
+  int getMaxHardwareBreakpoints(ProcessThreadId const &ptid) override;
+  int getMaxHardwareWatchpoints(ProcessThreadId const &ptid) override;
+#endif
+
 #if defined(ARCH_ARM)
 protected:
   uint32_t getStoppointData(ProcessThreadId const &ptid);
 
 public:
-  int getMaxHardwareBreakpoints(ProcessThreadId const &ptid) override;
-  int getMaxHardwareWatchpoints(ProcessThreadId const &ptid) override;
   int getMaxWatchpointSize(ProcessThreadId const &ptid) override;
-#endif
+
+protected:
+  ErrorCode writeStoppoint(ProcessThreadId const &ptid, size_t idx,
+                           uint32_t *val);
 
 public:
-  PTracePrivateData *_privateData;
+  ErrorCode writeHardwareBreakpoint(ProcessThreadId const &ptid, uint32_t addr,
+                                    uint32_t ctrl, size_t idx) override;
+  ErrorCode writeHardwareWatchpoint(ProcessThreadId const &ptid, uint32_t addr,
+                                    uint32_t ctrl, size_t idx) override;
+#elif defined(ARCH_X86) || defined(ARCH_X86_64)
+public:
+  uintptr_t readDebugReg(ProcessThreadId const &ptid, size_t idx) override;
+  ErrorCode writeDebugReg(ProcessThreadId const &ptid, size_t idx,
+                          uintptr_t val) override;
+#endif
+
+#if defined(ARCH_ARM64)
+protected:
+  int getMaxStoppoints(ProcessThreadId const &ptid, int regSet);
+#endif
 };
 }
 }

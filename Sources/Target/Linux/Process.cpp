@@ -15,11 +15,10 @@
 #include "DebugServer2/Host/Linux/ExtraWrappers.h"
 #include "DebugServer2/Host/Linux/PTrace.h"
 #include "DebugServer2/Host/Linux/ProcFS.h"
-#include "DebugServer2/Host/POSIX/AsyncProcessWaiter.h"
 #include "DebugServer2/Host/Platform.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Target/Thread.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <cerrno>
 #include <csignal>
@@ -34,37 +33,13 @@
 using ds2::Host::Linux::PTrace;
 using ds2::Host::Linux::ProcFS;
 using ds2::Host::Platform;
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
 
 #define super ds2::Target::POSIX::ELFProcess
 
 namespace ds2 {
 namespace Target {
 namespace Linux {
-
-Process::Process()
-    : super(), _softwareBreakpointManager(nullptr),
-      _hardwareBreakpointManager(nullptr), _terminated(false) {}
-
-Process::~Process() = default;
-
-ErrorCode Process::initialize(ProcessId pid, uint32_t flags) {
-  //
-  // Wait the main thread.
-  //
-  int status;
-  ErrorCode error = ptrace().wait(pid, &status);
-  if (error != kSuccess)
-    return error;
-
-  ptrace().traceThat(pid);
-
-  error = super::initialize(pid, flags);
-  if (error != kSuccess)
-    return error;
-
-  return attach(status);
-}
 
 ErrorCode Process::attach(int waitStatus) {
   if (waitStatus <= 0) {
@@ -136,10 +111,7 @@ ErrorCode Process::checkMemoryErrorCode(uint64_t address) {
   // mmap() returns MAP_FAILED thanks to the libc wrapper. Here we don't have
   // any, so we get the raw kernel return value, which is the address of the
   // newly allocated pages, if the call succeeds, or -errno if the call fails.
-
-  int pgsz = getpagesize();
-
-  if (address & (pgsz - 1)) {
+  if (address & (Platform::GetPageSize() - 1)) {
     int error = -address;
     DS2LOG(Debug, "mmap failed with errno=%s", Stringify::Errno(error));
     return Platform::TranslateError(error);
@@ -166,20 +138,19 @@ ErrorCode Process::wait() {
     auto threadIt = _threads.find(tid);
 
     if (threadIt == _threads.end()) {
-      //
+      // If we don't know about this thread yet, but it has a WIFEXITED() or a
+      // WIFSIGNALED() status (i.e.: it terminated), it means we already
+      // cleaned up the thread object (e.g.: in Process::suspend), but we
+      // hadn't waitpid()'d it yet. Avoid re-creating a Thread object here.
+      if (WIFEXITED(status) || WIFSIGNALED(status)) {
+        goto continue_waiting;
+      }
+
       // A new thread has appeared that we didn't know about. Create the
-      // Thread object (this call has side effects that save the Thread in
-      // the Process therefore we don't need to retain the pointer),
-      // resume the thread and just continue waiting.
-      //
-      // There's no need to call traceThat() on the newly created thread
-      // here because the ptrace flags are inherited when new threads
-      // are created.
-      //
+      // Thread object and return.
       DS2LOG(Debug, "creating new thread tid=%d", tid);
-      auto thread = new Thread(this, tid);
-      thread->resume();
-      goto continue_waiting;
+      _currentThread = new Thread(this, tid);
+      return kSuccess;
     } else {
       _currentThread = threadIt->second;
     }
@@ -218,46 +189,7 @@ ErrorCode Process::wait() {
       DS2LOG(Debug, "stopped tid=%d status=%#x signal=%s", tid, status,
              Stringify::Signal(signal));
 
-      if (signal == SIGSTOP || signal == SIGCHLD || signal == SIGRTMIN) {
-        //
-        // Silently ignore SIGSTOP, SIGCHLD and SIGRTMIN (this
-        // last one used for thread cancellation) and continue.
-        //
-        // Note(oba): The SIGRTMIN defines expands to a glibc
-        // call, this due to the fact the POSIX standard does
-        // not mandate that SIGRT* defines to be user-land
-        // constants.
-        //
-        // Note(sas): This is probably partially dead code as
-        // ptrace().step() doesn't work on ARM.
-        //
-        // Note(sas): Single-step detection should be higher up, not
-        // only for SIGSTOP, SIGCHLD and SIGRTMIN, but for every
-        // signal that we choose to ignore.
-        //
-        bool stepping = (_currentThread->state() == Thread::kStepped);
-
-        if (signal == SIGSTOP) {
-          signal = 0;
-        } else {
-          DS2LOG(Debug, "%s due to special signal, tid=%d status=%#x signal=%s",
-                 stepping ? "stepping" : "resuming", tid, status,
-                 Stringify::Signal(signal));
-        }
-
-        ErrorCode error;
-        if (stepping) {
-          error = _currentThread->step(signal);
-        } else {
-          error = _currentThread->resume(signal);
-        }
-
-        if (error != kSuccess) {
-          DS2LOG(Warning, "cannot resume thread %d, error=%d", tid, error);
-        }
-
-        goto continue_waiting;
-      } else if (_passthruSignals.find(signal) != _passthruSignals.end()) {
+      if (_passthruSignals.find(signal) != _passthruSignals.end()) {
         _currentThread->resume(signal);
         goto continue_waiting;
       } else {
@@ -462,31 +394,22 @@ ErrorCode Process::getMemoryRegionInfo(Address const &address,
   return kSuccess;
 }
 
-ErrorCode Process::readString(Address const &address, std::string &str,
-                              size_t length, size_t *count) {
-  if (_currentThread == nullptr)
-    return super::readString(address, str, length, count);
+ErrorCode Process::executeCode(ByteVector const &codestr, uint64_t &result) {
+  ErrorCode error;
 
-  return ptrace().readString(_currentThread->tid(), address, str, length,
-                             count);
-}
+  ProcessInfo info;
+  error = getInfo(info);
+  if (error != kSuccess) {
+    return error;
+  }
 
-ErrorCode Process::readMemory(Address const &address, void *data, size_t length,
-                              size_t *count) {
-  if (_currentThread == nullptr)
-    return super::readMemory(address, data, length, count);
+  error = ptrace().execute(_currentThread->tid(), info, &codestr[0],
+                           codestr.size(), result);
+  if (error != kSuccess) {
+    return error;
+  }
 
-  return ptrace().readMemory(_currentThread->tid(), address, data, length,
-                             count);
-}
-
-ErrorCode Process::writeMemory(Address const &address, void const *data,
-                               size_t length, size_t *count) {
-  if (_currentThread == nullptr)
-    return super::writeMemory(address, data, length, count);
-
-  return ptrace().writeMemory(_currentThread->tid(), address, data, length,
-                              count);
+  return kSuccess;
 }
 }
 }

@@ -13,20 +13,23 @@
 #include "DebugServer2/Target/Windows/Thread.h"
 #include "DebugServer2/Host/Platform.h"
 #include "DebugServer2/Host/Windows/ExtraWrappers.h"
-#include "DebugServer2/Support/Stringify.h"
 #include "DebugServer2/Target/Process.h"
 #include "DebugServer2/Utils/Log.h"
+#include "DebugServer2/Utils/Stringify.h"
 
 #include <cinttypes>
 
-#define super ds2::Target::ThreadBase
-
 using ds2::Host::Platform;
-using ds2::Support::Stringify;
+using ds2::Utils::Stringify;
+
+#define super ds2::Target::ThreadBase
 
 namespace ds2 {
 namespace Target {
 namespace Windows {
+
+Thread::Thread(Process *process, ThreadId tid, HANDLE handle)
+    : super(process, tid), _handle(handle) {}
 
 Thread::~Thread() { CloseHandle(_handle); }
 
@@ -56,19 +59,27 @@ ErrorCode Thread::resume(int signal, Address const &address) {
   // TODO(sas): Not sure how to translate the signal concept to Windows yet.
   // We'll probably have to get rid of these at some point.
   DS2ASSERT(signal == 0);
-  // TODO(sas): Continuing a thread from a given address is not implemented yet.
-  DS2ASSERT(!address.valid());
 
-  ErrorCode error = kSuccess;
-
-  if (_state == kStopped || _state == kStepped) {
-    ProcessInfo info;
-
-    error = process()->getInfo(info);
+  if (address.valid()) {
+    ErrorCode error = modifyRegisters(
+        [&address](Architecture::CPUState &state) { state.setPC(address); });
     if (error != kSuccess) {
       return error;
     }
+  }
 
+  switch (_state) {
+  case kInvalid:
+  case kRunning:
+    DS2BUG("trying to suspend tid %" PRI_PID " in state %s", tid(),
+           Stringify::ThreadState(_state));
+    break;
+
+  case kTerminated:
+    return kErrorProcessNotFound;
+
+  case kStopped:
+  case kStepped: {
     if (_stopInfo.event == StopInfo::kEventStop &&
         _stopInfo.reason == StopInfo::kReasonNone) {
       DWORD result = ResumeThread(_handle);
@@ -83,11 +94,12 @@ ErrorCode Thread::resume(int signal, Address const &address) {
     }
 
     _state = kRunning;
-  } else if (_state == kTerminated) {
-    error = kErrorProcessNotFound;
+    return kSuccess;
+  }
   }
 
-  return error;
+  // Silence warnings without using a `default:` case for the above switch.
+  DS2_UNREACHABLE();
 }
 
 void Thread::updateState() {
@@ -106,9 +118,10 @@ void Thread::updateState(DEBUG_EVENT const &de) {
     _state = kStopped;
 
     DS2LOG(
-        Debug, "exception from inferior, tid=%lu, code=%s, address=%p", tid(),
+        Debug, "exception from inferior, tid=%lu, code=%s, address=%" PRI_PTR,
+        tid(),
         Stringify::ExceptionCode(de.u.Exception.ExceptionRecord.ExceptionCode),
-        de.u.Exception.ExceptionRecord.ExceptionAddress);
+        PRI_PTR_CAST(de.u.Exception.ExceptionRecord.ExceptionAddress));
 
     switch (de.u.Exception.ExceptionRecord.ExceptionCode) {
     case EXCEPTION_BREAKPOINT:
@@ -151,6 +164,13 @@ void Thread::updateState(DEBUG_EVENT const &de) {
 
     case EXCEPTION_INVALID_DISPOSITION:
     case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+    case DS2_EXCEPTION_UNCAUGHT_COM:
+    case DS2_EXCEPTION_UNCAUGHT_USER:
+    case DS2_EXCEPTION_UNCAUGHT_WINRT:
+      _stopInfo.event = StopInfo::kEventStop;
+      _stopInfo.reason = StopInfo::kReasonInstructionError;
+      break;
+
     default:
       DS2BUG("unsupported exception code: %s",
              Stringify::ExceptionCode(
@@ -161,7 +181,7 @@ void Thread::updateState(DEBUG_EVENT const &de) {
 
   case LOAD_DLL_DEBUG_EVENT: {
     ErrorCode error;
-    std::wstring name = L"<NONAME>";
+    std::wstring name = L"<unknown>";
 
     ProcessInfo pi;
     error = process()->getInfo(pi);
@@ -200,9 +220,9 @@ void Thread::updateState(DEBUG_EVENT const &de) {
     } while (c != '\0');
 
   skip_name:
-    DS2LOG(Debug, "new DLL loaded: %s, base=%p",
+    DS2LOG(Debug, "new DLL loaded: %s, base=%" PRI_PTR,
            Host::Platform::WideToNarrowString(name).c_str(),
-           de.u.LoadDll.lpBaseOfDll);
+           PRI_PTR_CAST(de.u.LoadDll.lpBaseOfDll));
 
     if (de.u.LoadDll.hFile != NULL)
       CloseHandle(de.u.LoadDll.hFile);
@@ -213,17 +233,11 @@ void Thread::updateState(DEBUG_EVENT const &de) {
   } break;
 
   case UNLOAD_DLL_DEBUG_EVENT:
-    DS2LOG(Debug, "DLL unloaded, base=%p", de.u.UnloadDll.lpBaseOfDll);
+    DS2LOG(Debug, "DLL unloaded, base=%" PRI_PTR,
+           PRI_PTR_CAST(de.u.UnloadDll.lpBaseOfDll));
     _state = kStopped;
     _stopInfo.event = StopInfo::kEventStop;
     _stopInfo.reason = StopInfo::kReasonLibraryEvent;
-    break;
-
-  case CREATE_PROCESS_DEBUG_EVENT:
-  case CREATE_THREAD_DEBUG_EVENT:
-    _state = kStopped;
-    _stopInfo.event = StopInfo::kEventStop;
-    _stopInfo.reason = StopInfo::kReasonThreadCreate;
     break;
 
   case EXIT_THREAD_DEBUG_EVENT:
@@ -232,11 +246,26 @@ void Thread::updateState(DEBUG_EVENT const &de) {
     _stopInfo.reason = StopInfo::kReasonThreadExit;
     break;
 
-  case OUTPUT_DEBUG_STRING_EVENT:
+  case OUTPUT_DEBUG_STRING_EVENT: {
+    auto const &dsInfo = de.u.DebugString;
+    DS2LOG(Debug, "inferior output a debug string: %" PRI_PTR "[%d]",
+           PRI_PTR_CAST(dsInfo.lpDebugStringData), dsInfo.nDebugStringLength);
+    // TODO: We need to use WaitForDebugEventEx to get unicode strings.
+    DS2ASSERT(dsInfo.fUnicode == 0);
+
+    _stopInfo.debugString.resize(dsInfo.nDebugStringLength - 1);
+    ErrorCode error = process()->readMemory(
+        reinterpret_cast<uint64_t>(dsInfo.lpDebugStringData),
+        const_cast<char *>(_stopInfo.debugString.c_str()),
+        dsInfo.nDebugStringLength - 1);
+    if (error != kSuccess) {
+      return;
+    }
+
     _state = kStopped;
     _stopInfo.event = StopInfo::kEventStop;
-    _stopInfo.reason = StopInfo::kReasonNone;
-    break;
+    _stopInfo.reason = StopInfo::kReasonDebugOutput;
+  } break;
 
   default:
     DS2BUG("unknown debug event code: %lu", de.dwDebugEventCode);

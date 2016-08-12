@@ -83,12 +83,12 @@ struct CPUState64 {
 
   struct {
     X87Register regs[8];
-    uint32_t fstw;
-    uint32_t fctw;
-    uint32_t ftag;
-    uint64_t firip;
-    uint64_t forip;
-    uint32_t fop;
+    uint16_t fstw;
+    uint16_t fctw;
+    uint8_t ftag;
+    uint32_t firip;
+    uint32_t forip;
+    uint16_t fop;
   } x87;
 
   union {
@@ -103,9 +103,9 @@ struct CPUState64 {
           SSEVector _sse[128];
         };
         SSEVector const &operator[](size_t index) const {
-          return _sse[index << 1];
+          return _sse[index << 2];
         }
-        SSEVector &operator[](size_t index) { return _sse[index << 1]; }
+        SSEVector &operator[](size_t index) { return _sse[index << 2]; }
       } regs;
     } sse;
 
@@ -131,6 +131,8 @@ struct CPUState64 {
       EAVXVector regs[32];
     } eavx;
   };
+
+  // TODO - add information about xstate_hdr here
 
   struct {
     uint32_t dr[8];
