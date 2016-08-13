@@ -59,17 +59,12 @@ ErrorCode Thread::updateStopInfo(int waitStatus) {
     }
 
     si = &lwpinfo.pl_siginfo;
-    if (si->si_code == SI_USER && si->si_pid == 0 &&
-        _stopInfo.signal == SIGSTOP) { // (3)
+    if (si->si_pid == 0 && _stopInfo.signal == SIGSTOP) { // (3)
       _stopInfo.reason = StopInfo::kReasonTrap;
     } else if (_stopInfo.signal == SIGTRAP) { // (4)
       _stopInfo.reason = StopInfo::kReasonBreakpoint;
     } else {
-      // This is not a signal that we originated. We can output a
-      // warning if the signal comes from an external source.
-      DS2LOG(Warning,
-             "tid %d received signal %s from an external source (sender=%d)",
-             tid(), strsignal(_stopInfo.signal), si->si_pid);
+      _stopInfo.reason = StopInfo::kReasonSignalStop;
     }
   } break;
   }
