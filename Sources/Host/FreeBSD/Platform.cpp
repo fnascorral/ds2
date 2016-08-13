@@ -23,7 +23,7 @@ namespace Host {
 
 char const *Platform::GetOSTypeName() { return "freebsd"; }
 
-char const *Platform::GetOSVendorName() { return "unknown"; }
+char const *Platform::GetOSVendorName() { return "freebsd"; }
 
 static struct utsname const *GetCachedUTSName() {
   static struct utsname sUName = {"", "", "", "", ""};
