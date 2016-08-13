@@ -346,7 +346,7 @@ if ("${OS_NAME}" MATCHES "Linux")
 endif ()
 
 if ("${OS_NAME}" MATCHES "FreeBSD")
-  target_link_libraries(ds2 util procstat)
+  target_link_libraries(ds2 util procstat execinfo -Wl,-E)
 endif ()
 
 if ("${OS_NAME}" MATCHES "Windows")

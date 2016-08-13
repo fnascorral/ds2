@@ -11,7 +11,7 @@
 #include "DebugServer2/Utils/Backtrace.h"
 #include "DebugServer2/Utils/Log.h"
 
-#if defined(OS_DARWIN) || defined(__GLIBC__)
+#if defined(OS_DARWIN) || defined(OS_FREEBSD) || defined(__GLIBC__)
 #include <cxxabi.h>
 #include <dlfcn.h>
 #include <execinfo.h>
@@ -22,14 +22,15 @@
 namespace ds2 {
 namespace Utils {
 
-#if defined(OS_DARWIN) || defined(OS_WIN32) ||                                 \
+#if defined(OS_DARWIN) || defined(OS_WIN32) || defined(OS_FREEBSD) ||          \
     (defined(__GLIBC__) && !defined(PLATFORM_TIZEN))
 static void PrintBacktraceEntrySimple(void *address) {
   DS2LOG(Error, "%" PRI_PTR, PRI_PTR_CAST(address));
 }
 #endif
 
-#if defined(OS_DARWIN) || (defined(__GLIBC__) && !defined(PLATFORM_TIZEN))
+#if defined(OS_DARWIN) || defined(OS_FREEBSD) || (defined(__GLIBC__) &&        \
+    !defined(PLATFORM_TIZEN))
 void PrintBacktrace() {
   static const int kStackSize = 100;
   static void *stack[kStackSize];
