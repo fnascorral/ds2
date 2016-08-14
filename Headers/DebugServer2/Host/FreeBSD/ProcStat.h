@@ -43,6 +43,7 @@ public:
   static bool GetProcessInfo(ProcessId pid, ProcessInfo &info);
   static bool GetProcessMap(pid_t pid, std::vector<ds2::MemoryRegionInfo> &map);
   static bool GetThreadState(pid_t pid, pid_t tid, int &state, int &cpu);
+  static bool GetAuxiliaryVector(pid_t pid, std::string &str);
   static bool EnumerateAuxiliaryVector(
       pid_t pid,
       std::function<void(ELFSupport::AuxiliaryVectorEntry const &)> const &cb);

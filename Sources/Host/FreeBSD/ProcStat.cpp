@@ -110,8 +110,23 @@ bool ProcStat::GetProcessMap(pid_t pid,
   return true;
 }
 
-bool ProcStat::EnumerateAuxiliaryVector(
-    pid_t pid,
+bool ProcStat::GetAuxiliaryVector(pid_t pid, std::string &str) {  
+  struct procstat *pstat;
+  struct kinfo_proc *kip;
+  Elf_Auxinfo *auxvp;
+  unsigned int count;
+
+  pstat = procstat_open_sysctl();
+  kip = kinfo_getproc(pid);
+  if (kip == nullptr)
+    return false;
+ 
+  auxvp = procstat_getauxv(pstat, kip, &count);
+  str.assign((const char *)auxvp, count * sizeof(Elf_Auxinfo));
+  return true;
+}
+
+bool ProcStat::EnumerateAuxiliaryVector(pid_t pid,
     std::function<void(ELFSupport::AuxiliaryVectorEntry const &)> const &cb) {
 
   struct procstat *pstat;

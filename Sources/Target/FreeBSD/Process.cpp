@@ -327,8 +327,6 @@ ds2::Host::POSIX::PTrace &Process::ptrace() const {
   return const_cast<Process *>(this)->_ptrace;
 }
 
-ErrorCode Process::updateAuxiliaryVector() { return kSuccess; }
-
 ErrorCode Process::enumerateAuxiliaryVector(
     std::function<void(Support::ELFSupport::AuxiliaryVectorEntry const &)> const
         &cb) {
@@ -393,6 +391,11 @@ void Process::rescanThreads()
       thread->updateStopInfo(status);
     }
   });
+}
+
+ErrorCode Process::updateAuxiliaryVector() {
+  ProcStat::GetAuxiliaryVector(_pid, _auxiliaryVector);
+  return kSuccess;
 }
 
 }
