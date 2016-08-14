@@ -12,6 +12,7 @@
 
 #include "DebugServer2/Target/Process.h"
 #include "DebugServer2/BreakpointManager.h"
+#include "DebugServer2/Host/Platform.h"
 #include "DebugServer2/Host/FreeBSD/PTrace.h"
 #include "DebugServer2/Host/FreeBSD/ProcStat.h"
 #include "DebugServer2/Target/FreeBSD/Thread.h"
@@ -29,6 +30,7 @@
 
 using ds2::Host::FreeBSD::PTrace;
 using ds2::Host::FreeBSD::ProcStat;
+using ds2::Host::Platform;
 
 #define super ds2::Target::POSIX::ELFProcess
 
