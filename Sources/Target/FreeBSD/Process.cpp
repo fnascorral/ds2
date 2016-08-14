@@ -210,9 +210,9 @@ continue_waiting:
 
     signal = _currentThread->_stopInfo.signal;
 
-    if (signal == SIGSTOP || signal == SIGCHLD || signal == SIGRTMIN) {
+    if (signal == SIGCHLD || signal == SIGRTMIN) {
       //
-      // Silently ignore SIGSTOP, SIGCHLD and SIGRTMIN (this
+      // Silently ignore SIGCHLD and SIGRTMIN (this
       // last one used for thread cancellation) and continue.
       //
       // Note(oba): The SIGRTMIN defines expands to a glibc
