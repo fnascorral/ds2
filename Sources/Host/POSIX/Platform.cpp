@@ -155,6 +155,8 @@ ErrorCode Platform::TranslateError(int error) {
     return ds2::kErrorInvalidArgument;
   case ENOENT:
     return ds2::kErrorNotFound;
+  case ECHILD:
+    return ds2::kErrorProcessNotFound;
   default:
     DS2BUG("unknown error code: %d", error);
   }
