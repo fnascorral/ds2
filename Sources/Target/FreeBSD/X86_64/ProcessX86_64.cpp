@@ -75,14 +75,24 @@ ErrorCode Process::allocateMemory(size_t size, uint32_t protection,
   if (error != kSuccess)
     return error;
 
+  int prot = 0;
+
+  if (protection & ds2::kProtectionRead)
+    prot |= PROT_READ;
+
+  if (protection & ds2::kProtectionWrite)
+    prot |= PROT_WRITE;
+
+  if (protection & ds2::kProtectionExecute)
+    prot |= PROT_EXEC;
+
   ByteVector codestr;
-  PrepareMmapCode(size, protection, codestr);
+  PrepareMmapCode(size, prot, codestr);
 
   //
   // Code inject and execute
   //
-  error = ptrace().execute(_currentThread->tid(), info, &codestr[0],
-                           codestr.size(), *address);
+  error = ptrace().execute(_pid, info, &codestr[0], codestr.size(), *address);
   if (error != kSuccess)
     return error;
 
