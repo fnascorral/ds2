@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2015, Jakub Klama <jakub@ixsystems.com
+// Copyright (c) 2015, Jakub Klama <jakub@ixsystems.com>
 // All rights reserved.
 //
 // This source code is licensed under the University of Illinois/NCSA Open
@@ -33,8 +33,7 @@ bool ProcStat::GetProcessInfo(ProcessId pid, ProcessInfo &info) {
   kip = kinfo_getproc(pid);
   if (kip == nullptr)
     return false;
-
-  info.pid = pid;
+	
   info.parentPid = kip->ki_ppid;
   info.realUid = kip->ki_ruid;
   info.effectiveUid = kip->ki_uid;

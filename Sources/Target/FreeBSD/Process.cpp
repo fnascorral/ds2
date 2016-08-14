@@ -340,7 +340,7 @@ ErrorCode Process::updateInfo() {
   //
   // Some info like parent pid, OS vendor, etc is obtained via libprocstat.
   //
-  ProcStat::GetProcessInfo(_info.pid, _info);
+  ProcStat::GetProcessInfo(_pid, _info);
 
   //
   // Call super::updateInfo, in turn it will call updateAuxiliaryVector.
