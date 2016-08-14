@@ -78,11 +78,13 @@ ErrorCode Process::attach(int waitStatus) {
 
         keep_going = true;
         auto thread = new Thread(this, tid);
-        int status;
 
-        ptrace().wait(tid, &status);
-        ptrace().traceThat(tid);
-        thread->updateStopInfo(status);
+        if (ptrace().attach(tid) == kSuccess) {
+          int status;
+          ptrace().wait(tid, &status);
+          ptrace().traceThat(tid);
+          thread->updateStopInfo(status);
+        }
       });
     }
   }
