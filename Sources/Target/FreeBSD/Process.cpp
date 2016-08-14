@@ -349,6 +349,9 @@ ErrorCode Process::updateInfo() {
   if (error != kSuccess && error != kErrorAlreadyExist)
     return error;
 
+  _info.osType = Platform::GetOSTypeName();
+  _info.osVendor = Platform::GetOSVendorName();
+
   return kSuccess;
 }
 
